@@ -1,0 +1,26 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "anonym-legal",
+  "owner": {
+    "name": "anonym.legal",
+    "email": "support@anonym.legal"
+  },
+  "metadata": {
+    "description": "Mods by anonym.legal for Claude Code.",
+    "version": "0.6.2"
+  },
+  "plugins": [
+    {
+      "name": "anonym-legal-guard",
+      "source": "./",
+      "version": "0.6.2",
+      "description": "Replaces detected personal data with placeholders before text goes to the model. Protection against accidents, not against injected instructions or intent.",
+      "author": {
+        "name": "anonym.legal"
+      },
+      "homepage": "https://anonym.legal",
+      "license": "MIT",
+      "category": "security"
+    }
+  ]
+}

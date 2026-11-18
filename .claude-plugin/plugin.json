@@ -1,0 +1,140 @@
+{
+  "name": "anonym-legal-guard",
+  "version": "0.6.2",
+  "description": "Preview by anonym.legal: replaces detected personal data with placeholders before text goes to the model. Protection against accidents, not against injected instructions and not against intent. Detection is not complete. Requires an anonym.legal account (Basic, Pro or Business).",
+  "author": {
+    "name": "anonym.legal"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "anonym.legal API-Schlüssel",
+      "description": "API-Token mit API-Zugang. Ohne ihn werden Prompts blockiert. Wird geheim gespeichert, nie im Repository.",
+      "sensitive": true
+    },
+    "api_url": {
+      "type": "string",
+      "title": "API-Adresse",
+      "description": "Adresse von anonym.legal. Nur https:. Ein anderer Host als anonym.legal braucht allow_other_host.",
+      "default": "https://anonym.legal"
+    },
+    "allow_other_host": {
+      "type": "boolean",
+      "title": "Anderen Host erlauben",
+      "description": "Erlaubt eine api_url mit einem anderen Host als anonym.legal (etwa eine Testumgebung). Standard: aus; dann wird jeder Prompt mit einer Meldung verworfen.",
+      "default": false
+    },
+    "language": {
+      "type": "string",
+      "title": "Sprache der Erkennung",
+      "description": "Sprache(n) der Erkennung als gültige Codes, kommagetrennt, höchstens drei, z. B. de oder de,en. Jede weitere Sprache prüft jeden Text noch einmal (doppelte Kosten und Anfragen). „auto“ kennt der Analyzer nicht; der Mod macht daraus de,en.",
+      "default": "de"
+    },
+    "preset": {
+      "type": "string",
+      "title": "Voreinstellung",
+      "description": "Name einer Voreinstellung, z. B. developer; leer für die Standardeinstellung",
+      "default": ""
+    },
+    "media": {
+      "type": "string",
+      "title": "Bilder und Dokumente",
+      "description": "drop: zurückhalten (Bilder lassen sich nicht schwärzen); keep: durchlassen",
+      "options": [
+        "drop",
+        "keep"
+      ],
+      "default": "drop"
+    },
+    "leak_guard": {
+      "type": "string",
+      "title": "Lecksuche",
+      "description": "Sucht geschwärzte Werte im Klartext und kodiert (base64, Hex, Prozent) in Anfragen ans Modell und in den Argumenten von Werkzeugen nach außen (WebFetch, WebSearch, Agent, Monitor, MCP, Bash). block: eindeutige Fälle stoppen (Standard); log: nur melden; off: aus",
+      "options": [
+        "log",
+        "block",
+        "off"
+      ],
+      "default": "block"
+    },
+    "encoded_runs": {
+      "type": "string",
+      "title": "Kodierte Abschnitte",
+      "description": "base64 ab 16 und Hex ab 32 Zeichen in allem, was ans Modell geht. scan: dekodierbare Abschnitte prüfen und bei Treffer ersetzen (Standard); strict: zusätzlich nicht dekodierbare ab 512 Zeichen ersetzen, außer in Zeilen mit integrity oder sha512-; off: aus",
+      "options": [
+        "scan",
+        "strict",
+        "off"
+      ],
+      "default": "scan"
+    },
+    "shell_guard": {
+      "type": "string",
+      "title": "Befehle prüfen",
+      "description": "Lehnt gängige Umwandlungs- und Upload-Befehle ab (base64 mit Datei, xxd, od, curl -d @datei …) und fragt bei scp, sftp, rsync und tar c … | nach. block: so (Standard); ask: alles davon nachfragen; off: aus. Schutz gegen Versehen, keine Sperre gegen Absicht.",
+      "options": [
+        "block",
+        "ask",
+        "off"
+      ],
+      "default": "block"
+    },
+    "file_values": {
+      "type": "string",
+      "title": "Werte in Dateien",
+      "description": "real: beim Schreiben von Dateien setzt der Mod die echten Werte ein (Standard); deny: Streng-Modus, Write, Edit und NotebookEdit mit Platzhaltern laufen nicht. Read, Glob und Grep bekommen in beiden Fällen echte Werte.",
+      "options": [
+        "real",
+        "deny"
+      ],
+      "default": "real"
+    },
+    "detokenize_bash": {
+      "type": "boolean",
+      "title": "Echte Werte auch in Bash-Befehlen",
+      "description": "Achtung: ein Befehl kann Daten ins Netz schicken (curl). Standard: aus",
+      "default": false
+    },
+    "min_score": {
+      "type": "number",
+      "title": "Mindestwert der Erkennung",
+      "description": "Treffer unter diesem Wert werden übergangen (0 bis 1)",
+      "default": 0.5
+    },
+    "ignore_types": {
+      "type": "string",
+      "title": "Ausgenommene Typen",
+      "description": "Kommagetrennte Typen, die nicht ersetzt werden. Standard nach der Auswertung vom 2026-11-16: URL, DATE_TIME, NRP, ORGANIZATION (vor allem Scheintreffer in Code)",
+      "default": "URL,DATE_TIME,NRP,ORGANIZATION"
+    },
+    "scan_hook_context": {
+      "type": "boolean",
+      "title": "Hook-Kontext prüfen",
+      "description": "Auch die Ausgaben von Settings-Hooks schwärzen (Standard: an; sie können Kundendaten tragen)",
+      "default": true
+    },
+    "skip_attachments": {
+      "type": "string",
+      "title": "Nicht geprüfte Anhangsarten",
+      "description": "Kommagetrennte Arten von Anhängen, die Claude Code selbst schreibt und die nicht geprüft werden (Werkzeug-, Skill- und Agentenlisten). Unbekannte Arten werden geprüft.",
+      "default": "deferred_tools_delta,skill_listing,agent_listing_delta,mcp_instructions_delta,model,date,remote_session_change"
+    },
+    "allow_values": {
+      "type": "string",
+      "title": "Erlaubte Werte",
+      "description": "Kommagetrennte Werte, die nie ersetzt werden (Standard: Namen von Claude und Anthropic, die in jeder Sitzung vorkommen)",
+      "default": "Claude,Claude Code,Claude Opus,Claude Sonnet,Claude Haiku,Claude Fable,Anthropic,Opus,Sonnet,Haiku,Fable"
+    }
+  },
+  "homepage": "https://anonym.legal",
+  "repository": "https://github.com/georgecurta/anonym-legal-guard",
+  "license": "MIT",
+  "keywords": [
+    "privacy",
+    "pii",
+    "anonymization",
+    "gdpr",
+    "security"
+  ]
+}
