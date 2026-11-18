@@ -1,6 +1,6 @@
 {
   "name": "anonym-legal-guard",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Preview by anonym.legal: replaces detected personal data with placeholders before text goes to the model. Protection against accidents, not against injected instructions and not against intent. Detection is not complete. Requires an anonym.legal account (Basic, Pro or Business).",
   "author": {
     "name": "anonym.legal"
@@ -9,38 +9,48 @@
   "userConfig": {
     "api_key": {
       "type": "string",
-      "title": "anonym.legal API-Schlüssel",
-      "description": "API-Token mit API-Zugang. Ohne ihn werden Prompts blockiert. Wird geheim gespeichert, nie im Repository.",
+      "title": "API token (anonym.legal)",
+      "description": "anonym.legal → Settings → Developer → API Access Token. Without it every prompt is withheld. Stored as a secret, never in the repository.",
       "sensitive": true
+    },
+    "ui_language": {
+      "type": "string",
+      "title": "Interface language",
+      "description": "Language of the mod's messages, status line and /pii: en (English) or de (Deutsch).",
+      "options": [
+        "en",
+        "de"
+      ],
+      "default": "en"
+    },
+    "language": {
+      "type": "string",
+      "title": "Detection languages",
+      "description": "account (default): the automatic detection languages saved in your anonym.legal account (Settings → Language). Or codes separated by commas, at most three, e.g. de or de,en. Each extra language checks every text again and costs tokens.",
+      "default": "account"
     },
     "api_url": {
       "type": "string",
-      "title": "API-Adresse",
-      "description": "Adresse von anonym.legal. Nur https:. Ein anderer Host als anonym.legal braucht allow_other_host.",
+      "title": "API address",
+      "description": "Address of anonym.legal. https only. A host other than anonym.legal needs allow_other_host.",
       "default": "https://anonym.legal"
     },
     "allow_other_host": {
       "type": "boolean",
-      "title": "Anderen Host erlauben",
-      "description": "Erlaubt eine api_url mit einem anderen Host als anonym.legal (etwa eine Testumgebung). Standard: aus; dann wird jeder Prompt mit einer Meldung verworfen.",
+      "title": "Allow other host",
+      "description": "Allows an api_url with a host other than anonym.legal (e.g. a test environment). Default: off; every prompt is then rejected with a message.",
       "default": false
-    },
-    "language": {
-      "type": "string",
-      "title": "Sprache der Erkennung",
-      "description": "Sprache(n) der Erkennung als gültige Codes, kommagetrennt, höchstens drei, z. B. de oder de,en. Jede weitere Sprache prüft jeden Text noch einmal (doppelte Kosten und Anfragen). „auto“ kennt der Analyzer nicht; der Mod macht daraus de,en.",
-      "default": "de"
     },
     "preset": {
       "type": "string",
-      "title": "Voreinstellung",
-      "description": "Name einer Voreinstellung, z. B. developer; leer für die Standardeinstellung",
+      "title": "Preset",
+      "description": "Name of a preset, e.g. developer; empty for the default settings.",
       "default": ""
     },
     "media": {
       "type": "string",
-      "title": "Bilder und Dokumente",
-      "description": "drop: zurückhalten (Bilder lassen sich nicht schwärzen); keep: durchlassen",
+      "title": "Images and documents",
+      "description": "drop: withhold (images cannot be redacted); keep: let them through.",
       "options": [
         "drop",
         "keep"
@@ -49,8 +59,8 @@
     },
     "leak_guard": {
       "type": "string",
-      "title": "Lecksuche",
-      "description": "Sucht geschwärzte Werte im Klartext und kodiert (base64, Hex, Prozent) in Anfragen ans Modell und in den Argumenten von Werkzeugen nach außen (WebFetch, WebSearch, Agent, Monitor, MCP, Bash). block: eindeutige Fälle stoppen (Standard); log: nur melden; off: aus",
+      "title": "Leak check",
+      "description": "Looks for redacted values in plain text and encoded (base64, hex, percent) in requests to the model and in the arguments of outbound tools (WebFetch, WebSearch, Agent, Monitor, MCP, Bash). block: stop clear cases (default); log: report only; off: off.",
       "options": [
         "log",
         "block",
@@ -60,8 +70,8 @@
     },
     "encoded_runs": {
       "type": "string",
-      "title": "Kodierte Abschnitte",
-      "description": "base64 ab 16 und Hex ab 32 Zeichen in allem, was ans Modell geht. scan: dekodierbare Abschnitte prüfen und bei Treffer ersetzen (Standard); strict: zusätzlich nicht dekodierbare ab 512 Zeichen ersetzen, außer in Zeilen mit integrity oder sha512-; off: aus",
+      "title": "Encoded sections",
+      "description": "base64 from 16 and hex from 32 characters in everything that goes to the model. scan: check decodable sections and replace on a match (default); strict: also replace undecodable ones from 512 characters, except in lines with integrity or sha512-; off: off.",
       "options": [
         "scan",
         "strict",
@@ -71,8 +81,8 @@
     },
     "shell_guard": {
       "type": "string",
-      "title": "Befehle prüfen",
-      "description": "Lehnt gängige Umwandlungs- und Upload-Befehle ab (base64 mit Datei, xxd, od, curl -d @datei …) und fragt bei scp, sftp, rsync und tar c … | nach. block: so (Standard); ask: alles davon nachfragen; off: aus. Schutz gegen Versehen, keine Sperre gegen Absicht.",
+      "title": "Command check",
+      "description": "Rejects common conversion and upload commands (base64 with a file, xxd, od, curl -d @file …) and asks for scp, sftp, rsync and tar c … |. block: as described (default); ask: ask for all of them; off: off. Protection against accidents, not a lock against intent.",
       "options": [
         "block",
         "ask",
@@ -82,8 +92,8 @@
     },
     "file_values": {
       "type": "string",
-      "title": "Werte in Dateien",
-      "description": "real: beim Schreiben von Dateien setzt der Mod die echten Werte ein (Standard); deny: Streng-Modus, Write, Edit und NotebookEdit mit Platzhaltern laufen nicht. Read, Glob und Grep bekommen in beiden Fällen echte Werte.",
+      "title": "Values in files",
+      "description": "real: when writing files the mod inserts the real values (default); deny: strict mode, Write, Edit and NotebookEdit with placeholders do not run. Read, Glob and Grep get real values in both cases.",
       "options": [
         "real",
         "deny"
@@ -92,38 +102,38 @@
     },
     "detokenize_bash": {
       "type": "boolean",
-      "title": "Echte Werte auch in Bash-Befehlen",
-      "description": "Achtung: ein Befehl kann Daten ins Netz schicken (curl). Standard: aus",
+      "title": "Real values in Bash commands too",
+      "description": "Caution: a command can send data to the network (curl). Default: off.",
       "default": false
     },
     "min_score": {
       "type": "number",
-      "title": "Mindestwert der Erkennung",
-      "description": "Treffer unter diesem Wert werden übergangen (0 bis 1)",
+      "title": "Minimum detection score",
+      "description": "Matches below this score are skipped (0 to 1).",
       "default": 0.5
     },
     "ignore_types": {
       "type": "string",
-      "title": "Ausgenommene Typen",
-      "description": "Kommagetrennte Typen, die nicht ersetzt werden. Standard nach der Auswertung vom 2026-11-16: URL, DATE_TIME, NRP, ORGANIZATION (vor allem Scheintreffer in Code)",
+      "title": "Ignored types",
+      "description": "Comma-separated types that are not replaced. Default after the 2026-11-16 evaluation: URL, DATE_TIME, NRP, ORGANIZATION (mostly false matches in code).",
       "default": "URL,DATE_TIME,NRP,ORGANIZATION"
     },
     "scan_hook_context": {
       "type": "boolean",
-      "title": "Hook-Kontext prüfen",
-      "description": "Auch die Ausgaben von Settings-Hooks schwärzen (Standard: an; sie können Kundendaten tragen)",
+      "title": "Check hook context",
+      "description": "Also redact the output of settings hooks (default: on; it can carry customer data).",
       "default": true
     },
     "skip_attachments": {
       "type": "string",
-      "title": "Nicht geprüfte Anhangsarten",
-      "description": "Kommagetrennte Arten von Anhängen, die Claude Code selbst schreibt und die nicht geprüft werden (Werkzeug-, Skill- und Agentenlisten). Unbekannte Arten werden geprüft.",
+      "title": "Attachment kinds not checked",
+      "description": "Comma-separated kinds of attachments that Claude Code writes itself and that are not checked (tool, skill and agent lists). Unknown kinds are checked.",
       "default": "deferred_tools_delta,skill_listing,agent_listing_delta,mcp_instructions_delta,model,date,remote_session_change"
     },
     "allow_values": {
       "type": "string",
-      "title": "Erlaubte Werte",
-      "description": "Kommagetrennte Werte, die nie ersetzt werden (Standard: Namen von Claude und Anthropic, die in jeder Sitzung vorkommen)",
+      "title": "Allowed values",
+      "description": "Comma-separated values that are never replaced (default: names of Claude and Anthropic that occur in every session).",
       "default": "Claude,Claude Code,Claude Opus,Claude Sonnet,Claude Haiku,Claude Fable,Anthropic,Opus,Sonnet,Haiku,Fable"
     }
   },

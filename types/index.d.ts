@@ -28,7 +28,7 @@ export type GuardStats = {
   blocked: number
   /** ersetzte kodierte Abschnitte (base64, Hex) */
   encoded?: number
-  /** Ergebnis des Vorwärmens je Sprache: `bereit` oder der Fehler */
+  /** Ergebnis des Vorwärmens je Sprache: `bereit`/`ready` oder der Fehler; im Kontomodus unter `account`, z. B. `ready: de,en` */
   warm?: Record<string, string>
   /** letzte Fehlermeldung der Erkennung */
   lastError?: string

@@ -1,4 +1,4 @@
-// anonym.legal PII-Schutzschicht für Claude Code (Prototyp v0.6).
+// anonym.legal PII-Schutzschicht für Claude Code (Prototyp v0.7: Meldungen en/de, Erkennungssprache aus dem Konto).
 //
 // Was der Mod tut:
 //   1. session.append: jede Zeile, die gespeichert und ans Modell geschickt wird, geht vorher
@@ -32,13 +32,12 @@ import {
   setAliasDeny,
   encodedNameHit,
   encodedPlan,
-  ENCODED_WITHHELD,
   findLeak,
+  isAccountOption,
   isTokenCountRequest,
   requestLeak,
   leftoverTokens,
   newTag,
-  NOT_A_LOCK,
   parseLanguages,
   plausible,
   rateWindow,
@@ -51,11 +50,12 @@ import {
   worthScanning,
   type Entity,
 } from './core'
+import { msg, parseLang, type Key, type Lang } from './messages'
 
 type Block = { type: string; [field: string]: unknown }
 
 /** Fassung des Mods; muss zu `.claude-plugin/plugin.json` passen (der Mod liest keine Dateien). */
-export const VERSION = '0.6.2'
+export const VERSION = '0.7.0'
 const CLIENT = `ClaudeCodeMod/${VERSION}`
 
 const vaultAtom = atom({ plugin: 'anonym-legal-guard', key: 'vault' } as const, emptyVault(), { shape: 'vault-3' })
@@ -79,13 +79,10 @@ const OVERLAP = 400
 /** Zwischenspeicher: derselbe Text wird nur einmal geprüft (Prompt, dann seine Zeile). */
 const CACHE_MAX = 200
 
-const WITHHELD = '[anonym.legal: Inhalt zurückgehalten, die PII-Prüfung ist fehlgeschlagen]'
-const MEDIA_DROPPED = '[anonym.legal: Bild oder Dokument zurückgehalten, es kann nicht geschwärzt werden]'
-const UNKNOWN_DROPPED = '[anonym.legal: ein Inhalt unbekannter Art wurde zurückgehalten]'
-const HINT =
-  'Hinweis von anonym.legal: Personenbezogene Daten erscheinen in dieser Sitzung als Platzhalter wie ‹PERSON_1·abc›. ' +
-  'Das ist gewollt. Verwende die Platzhalter unverändert, auch in Dateien. Beim Schreiben von Dateien und in der Anzeige ' +
-  'für den Nutzer setzt dieser Mod auf dem Rechner des Nutzers die echten Werte ein. Schreibe nicht, dass du die echten Werte nicht kennst.'
+/** Eine Meldung in der Sprache dieser Ladung (Option `ui_language`). */
+const t = (key: Key, params?: Record<string, string | number>) => msg(cfg.lang, key, params)
+/** Beide Fassungen des Hinweises fürs Modell: eine Sitzung kann mit anderer Sprache fortgesetzt werden. */
+const hints = () => [...new Set([t('hint'), msg('en', 'hint'), msg('de', 'hint')])]
 
 /** Felder, die die Engine setzt; sie werden nie umgeschrieben. */
 const RESERVED = new Set(['tool', 'tool_use_id', 'agentId', 'consent', 'requestMeta'])
@@ -97,6 +94,10 @@ type Config = {
   /** Warum die Adresse nicht benutzt wird; dann geht keine Anfrage hinaus und jeder Prompt wird verworfen. */
   urlProblem?: string
   apiKey: string
+  /** Sprache der Meldungen */
+  lang: Lang
+  /** Kontomodus: keine Sprache im Körper, der Server nimmt die des Kontos */
+  account: boolean
   languages: string[]
   preset: string
   leakGuard: string
@@ -115,7 +116,7 @@ type Config = {
 
 /** Die Optionen dieser Ladung; `register` setzt sie bei jedem Laden neu. */
 let cfg: Config = {
-  apiUrl: 'https://anonym.legal', apiKey: '', languages: ['de'], preset: '', leakGuard: 'block', encodedRuns: 'scan', shellGuard: 'block', fileValues: 'real', media: 'drop',
+  apiUrl: 'https://anonym.legal', apiKey: '', lang: 'en', account: true, languages: [], preset: '', leakGuard: 'block', encodedRuns: 'scan', shellGuard: 'block', fileValues: 'real', media: 'drop',
   detokenizeBash: false, minScore: 0.5, ignoreTypes: new Set(), scanHookContext: true, skipAttachments: new Set(), allowValues: new Set(), cache: new Map(),
 }
 
@@ -163,7 +164,7 @@ async function slot<T>(work: () => Promise<T>): Promise<T> {
 async function fetchOnce($: EngineInterface, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; text: string; headers: Record<string, string> }> {
   let timer: { cancel: () => void } | undefined
   const timeout = new Promise<never>((_, reject) => {
-    timer = $.clock.after(TIMEOUT_MS, () => reject(new Error(`anonym.legal antwortet nicht (Zeitgrenze ${TIMEOUT_MS / 1000} s)`)))
+    timer = $.clock.after(TIMEOUT_MS, () => reject(new Error(t('timeout', { s: TIMEOUT_MS / 1000 }))))
   })
   try {
     return await Promise.race([
@@ -205,7 +206,7 @@ async function post($: EngineInterface, body: Record<string, unknown>): Promise<
     const gate = rateWindow(sent, now, RATE_LIMIT, RATE_WINDOW)
     sent = gate.times
     if (gate.waitMs !== undefined) {
-      throw new Error(`eigene Grenze des Mods erreicht (${RATE_LIMIT} Anfragen je 5 Minuten), nächste Anfrage in ${Math.ceil(gate.waitMs / 1000)} s`)
+      throw new Error(t('rateLimit', { limit: RATE_LIMIT, wait: Math.ceil(gate.waitMs / 1000) }))
     }
     const res = await fetchOnce($, body)
     if (!RETRY.has(res.status) || attempt >= PAUSES.length) return res
@@ -219,7 +220,7 @@ async function post($: EngineInterface, body: Record<string, unknown>): Promise<
 async function analyze($: EngineInterface, text: string): Promise<Entity[]> {
   const hit = cfg.cache.get(text)
   if (hit) return hit
-  if (!cfg.apiKey) throw new Error('kein API-Schlüssel eingetragen (Option api_key)')
+  if (!cfg.apiKey) throw new Error(t('noKey'))
   if (cfg.urlProblem) throw new Error(cfg.urlProblem)
   return slot(() => analyzeNow($, text))
 }
@@ -230,20 +231,43 @@ const WARM_TEXT = 'anonym.legal: Vorwärmen der Erkennung.'
 /**
  * Vorwärmen: je Sprache eine kurze Anfrage, an der Warteschlange vorbei. Das Ergebnis steht in
  * `GuardStats.warm` und in `/pii`; eine Sprache, die der Server nicht kennt, zeigt sich hier zuerst.
+ * Im Kontomodus genau eine Anfrage ohne Sprache; sie zeigt, welche Sprachen der Server aus dem Konto nimmt.
  */
 async function warm($: EngineInterface): Promise<void> {
+  if (cfg.account) {
+    let result: string
+    try {
+      const r = await request($, { text: WARM_TEXT, output_mode: 'full' })
+      result = t('warmReadyAccount', { langs: accountLanguages(r).join(',') })
+    } catch (err) {
+      result = String((err as Error)?.message ?? err)
+    }
+    await note($, (s) => ({ ...s, warm: { ...(s.warm ?? {}), account: result } }))
+    return
+  }
   await Promise.all(
     cfg.languages.map(async (language) => {
       let result: string
       try {
         const r = await request($, { text: WARM_TEXT, language, output_mode: 'full' })
-        result = r.language === language ? 'bereit' : `Sprache ${language} wird vom Server nicht unterstützt`
+        result = r.language === language ? t('warmReady') : t('langUnsupported', { language })
       } catch (err) {
         result = String((err as Error)?.message ?? err)
       }
       await note($, (s) => ({ ...s, warm: { ...(s.warm ?? {}), [language]: result } }))
     }),
   )
+}
+
+/** Die Sprachen des Kontos, wie der Server sie zuletzt nannte; `undefined`: noch nicht bekannt. */
+let accountUsed: string[] | undefined
+
+/** Die Sprachen, die der Server im Kontomodus genommen hat; fehlen sie oder sind leer, wirft es (fail closed). */
+function accountLanguages(r: Answer): string[] {
+  if (!r.languagesUsed) throw new Error(t('accountUnsupported'))
+  if (!r.languagesUsed.length) throw new Error(t('accountEmpty'))
+  accountUsed = r.languagesUsed
+  return r.languagesUsed
 }
 
 /** Ob der Server den Sprachplan kennt (`metadata.languages_used`), je Ladung; `undefined`: noch nicht gefragt. */
@@ -259,17 +283,17 @@ function failure(status: number, text: string): string {
   } catch {
     // kein JSON
   }
-  if (status === 401) return 'Token ungültig (HTTP 401)'
-  if (status === 402) return 'Guthaben leer (HTTP 402)'
-  if (status === 403) return 'Tarif ohne Zugang zum Mod (HTTP 403; der Mod gehört zu Basic, Pro und Business)'
+  if (status === 401) return t('http401')
+  if (status === 402) return t('http402')
+  if (status === 403) return t('http403')
   if (status === 400 && data.error === 'UNSUPPORTED_LANGUAGE') {
     const list = Array.isArray(data.unsupported) ? data.unsupported.map(String).join(', ') : cfg.languages.join(', ')
-    return `Sprache ${list} wird vom Server nicht unterstützt (HTTP 400)`
+    return t('http400lang', { list })
   }
-  if (status === 503 && data.error === 'LANGUAGE_CATALOG_UNAVAILABLE') return 'Sprachkatalog des Servers nicht erreichbar (HTTP 503)'
-  if (status === 503 && data.error === 'MODEL_LOADING') return `Sprachmodell${data.language ? ` ${data.language}` : ''} lädt noch (HTTP 503)`
-  if (status === 429) return 'Drosselung durch den Server (HTTP 429)'
-  return `anonym.legal antwortet HTTP ${status}`
+  if (status === 503 && data.error === 'LANGUAGE_CATALOG_UNAVAILABLE') return t('http503catalog')
+  if (status === 503 && data.error === 'MODEL_LOADING') return t('http503loading', { what: data.language ? ` ${data.language}` : '' })
+  if (status === 429) return t('http429')
+  return t('httpOther', { status })
 }
 
 async function request($: EngineInterface, body: Record<string, unknown>): Promise<Answer> {
@@ -279,15 +303,15 @@ async function request($: EngineInterface, body: Record<string, unknown>): Promi
   try {
     data = JSON.parse(res.text) as typeof data
   } catch {
-    throw new Error('anonym.legal: Antwort nicht lesbar')
+    throw new Error(t('unreadable'))
   }
   // Streng lesen: Eine Antwort, die anders aussieht als vereinbart, ist kein „nichts gefunden“.
   // Sonst ginge die Zeile bei `success: true` ohne `entities` ungeschwärzt durch.
-  if (data.success !== true) throw new Error('anonym.legal: Antwort ohne success=true')
-  if (!Array.isArray(data.entities)) throw new Error('anonym.legal: Antwort ohne Trefferliste (entities)')
+  if (data.success !== true) throw new Error(t('noSuccess'))
+  if (!Array.isArray(data.entities)) throw new Error(t('noEntities'))
   for (const e of data.entities) {
     if (!e || typeof e !== 'object' || typeof e.start !== 'number' || typeof e.end !== 'number' || typeof e.entity_type !== 'string') {
-      throw new Error('anonym.legal: Treffer ohne Typ oder ohne Position als Zahl')
+      throw new Error(t('badEntity'))
     }
   }
   const used = data.metadata?.languages_used
@@ -298,9 +322,11 @@ async function request($: EngineInterface, body: Record<string, unknown>): Promi
   }
 }
 
-const unsupported = (language: string) => new Error(`Sprache ${language} wird vom Server nicht unterstützt`)
+const unsupported = (language: string) => new Error(t('langUnsupported', { language }))
 
 /**
+ * Kontomodus: eine Anfrage je Stück ohne `language` und `languages`; der Server nimmt die Sprachen des
+ * Kontos und nennt sie in `metadata.languages_used` (fehlt das oder ist es leer, wirft es). Sonst:
  * Eine Anfrage je Text mit allen Sprachen. Der neue Server prüft sie über den Sprachplan und
  * nennt sie in `metadata.languages_used`; jede Sprache, die dort fehlt, wird einzeln nachgeholt. Nennt
  * die Antwort nur `metadata.language`, gilt nur die erste Sprache als geprüft. Bei einer Einzelanfrage
@@ -311,7 +337,7 @@ async function analyzeNow($: EngineInterface, text: string): Promise<Entity[]> {
   if (hit) return hit
   const langs = cfg.languages
   const first = langs[0]
-  if (first === undefined) throw new Error('keine gültige Sprache eingetragen (Option language)')
+  if (first === undefined && !cfg.account) throw new Error(t('noValidLang'))
   const all: Entity[] = []
   const collect = (entities: readonly Entity[], start: number) => {
     for (const e of entities) {
@@ -320,6 +346,12 @@ async function analyzeNow($: EngineInterface, text: string): Promise<Entity[]> {
   }
   for (const { piece, start } of chunks(text, CHUNK, OVERLAP)) {
     const extra: Record<string, unknown> = cfg.preset ? { preset: cfg.preset } : {}
+    if (first === undefined) {
+      const answer = await request($, { text: piece, output_mode: 'full', ...extra })
+      accountLanguages(answer)
+      collect(answer.entities, start)
+      continue
+    }
     const plan = await request($, { text: piece, language: first, languages: langs, output_mode: 'full', ...extra })
     collect(plan.entities, start)
     let done: Set<string>
@@ -373,7 +405,7 @@ async function scrubEncoded($: EngineInterface, text: string, vault: Vault, dry:
   }
   if (!spans.length) return text
   if (!dry) await note($, (s) => ({ ...s, encoded: (s.encoded ?? 0) + spans.length }))
-  return replaceSpans(text, spans, ENCODED_WITHHELD)
+  return replaceSpans(text, spans, t('encodedWithheld'))
 }
 
 /**
@@ -384,11 +416,12 @@ async function scrubEncoded($: EngineInterface, text: string, vault: Vault, dry:
 async function scrub($: EngineInterface, text: string, dry = false): Promise<string> {
   // Der eigene Hinweis fürs Modell wird nicht geschwärzt (Live-Test v0.4: mit englischer Erkennung
   // wurden Wörter darin ersetzt, und der Hinweis kam verstümmelt an).
-  if (text.includes(HINT)) {
-    const parts = text.split(HINT)
+  const own = hints().find((h) => text.includes(h))
+  if (own) {
+    const parts = text.split(own)
     const out: string[] = []
     for (const p of parts) out.push(await scrub($, p, dry))
-    return out.join(HINT)
+    return out.join(own)
   }
   if (!worthScanning(text)) return text
   const before = await vaultOf($)
@@ -428,9 +461,9 @@ async function scrubBlocks($: EngineInterface, content: readonly Block[]): Promi
         for (const b of inner as Block[]) {
           if (typeof b.text === 'string') kept.push({ ...b, text: await scrub($, b.text) })
           else if (b.type === 'image' || b.type === 'document') {
-            if (cfg.media === 'drop') marker = MEDIA_DROPPED
+            if (cfg.media === 'drop') marker = t('mediaDropped')
             else kept.push(b)
-          } else marker ||= UNKNOWN_DROPPED
+          } else marker ||= t('unknownDropped')
         }
         if (marker && !kept.some((b) => b.type === 'text')) kept.push({ type: 'text', text: marker })
         out.push({ ...block, content: kept })
@@ -445,7 +478,7 @@ async function scrubBlocks($: EngineInterface, content: readonly Block[]): Promi
       out.push(block)
     }
   }
-  if (droppedTop && !out.some((b) => b.type === 'text' || b.type === 'tool_result')) out.push({ type: 'text', text: MEDIA_DROPPED })
+  if (droppedTop && !out.some((b) => b.type === 'text' || b.type === 'tool_result')) out.push({ type: 'text', text: t('mediaDropped') })
   return out
 }
 
@@ -453,8 +486,8 @@ async function scrubBlocks($: EngineInterface, content: readonly Block[]): Promi
 function withheld(content: readonly Block[]): Block[] {
   return content
     .map((b) => {
-      if (b.type === 'text') return { ...b, text: WITHHELD }
-      if (b.type === 'tool_result') return { ...b, content: WITHHELD }
+      if (b.type === 'text') return { ...b, text: t('withheld') }
+      if (b.type === 'tool_result') return { ...b, content: t('withheld') }
       return b
     })
     .filter((b) => b.type !== 'image' && b.type !== 'document')
@@ -464,8 +497,9 @@ async function note($: EngineInterface, patch: (s: GuardStats) => GuardStats): P
   let s: GuardStats = { scanned: 0, withheld: 0, leaks: 0, blocked: 0 }
   await update($, statsAtom, (old) => (s = patch(old)))
   const v = await read($, vaultAtom)
-  const warn = s.withheld > 0 || s.leaks > 0 ? ` · ${s.withheld} zurückgehalten · ${s.leaks} Leck (${s.blocked} gestoppt)` : ''
-  $.ui.status(`anonym.legal: ${v.replaced} ersetzt${warn}`)
+  const warn = s.withheld > 0 || s.leaks > 0 ? t('statusWarn', { withheld: s.withheld, leaks: s.leaks, blocked: s.blocked }) : ''
+  const langs = cfg.account && accountUsed ? ` · ${t('langAccountKnown', { langs: accountUsed.join(', ') })}` : ''
+  $.ui.status(`${t('statusReplaced', { n: v.replaced })}${warn}${langs}`)
 }
 
 function worthRow(door: string, name: string | undefined, origin: string | undefined): boolean {
@@ -485,32 +519,31 @@ async function restoreArgs<T extends object>($: EngineInterface, e: T): Promise<
   return leftover.length ? { leftover } : (args as T)
 }
 
-const LEFTOVER = (t: string[]) =>
-  `anonym.legal: der Aufruf enthält Platzhalter, die sich in dieser Sitzung nicht zurückübersetzen lassen (${[...new Set(t)].slice(0, 3).join(', ')}). ` +
-  `Er lief nicht, damit keine Platzhalter in Dateien landen. Das passiert nach --resume oder bei erfundenen Platzhaltern; lies die Datei neu ein. ${NOT_A_LOCK}`
+const LEFTOVER = (list: string[]) => `${t('leftover', { list: [...new Set(list)].slice(0, 3).join(', ') })} ${t('notALock')}`
 
 /** Der Befehlstext eines Shell-Werkzeugs; ein Monitor auf eine WebSocket hat keinen. Unlesbar: wirft. */
 function commandOf(tool: string, input: unknown): string | undefined {
   const c = input && typeof input === 'object' ? (input as { command?: unknown }).command : undefined
   if (typeof c === 'string') return c
   if (tool === 'Monitor' && c === undefined) return undefined
-  throw new Error('Befehl nicht lesbar')
+  throw new Error(t('commandUnreadable'))
 }
 
 const WRITERS = new Set(['Write', 'Edit', 'NotebookEdit'])
-const STRICT_FILES =
-  'anonym.legal (Streng-Modus, file_values deny): der Aufruf enthält Platzhalter. Er lief nicht, damit keine echten Werte über das Modell ' +
-  `in Dateien geschrieben werden. Schreibe ohne Platzhalter oder lass den Nutzer die Werte selbst einsetzen. ${NOT_A_LOCK}`
-const EGRESS_STOPPED = 'anonym.legal: Aufruf abgelehnt, ein Argument enthält einen geschwärzten Wert im Klartext'
-const RESTORE_FAILED = `anonym.legal: die Platzhalter ließen sich nicht zurückübersetzen, der Aufruf lief nicht. ${NOT_A_LOCK}`
-const TOKEN_COUNT_WITHHELD = `anonym.legal: Zählanfrage zurückgehalten; sie trüge Text vor dem Schwärzen. ${NOT_A_LOCK}`
-const LEAK_STOPPED = `anonym.legal: die Anfrage ans Modell enthielt einen geschwärzten Wert im Klartext und wurde gestoppt. ${NOT_A_LOCK}`
+const STRICT_FILES = () => `${t('strictFiles')} ${t('notALock')}`
+const EGRESS_STOPPED = () => t('egressStopped')
+const RESTORE_FAILED = () => `${t('restoreFailed')} ${t('notALock')}`
+const TOKEN_COUNT_WITHHELD = () => `${t('tokenCountWithheld')} ${t('notALock')}`
+const LEAK_STOPPED = () => `${t('leakStopped')} ${t('notALock')}`
 
 export const register: Register = (on, options) => {
+  const languageOption = String(options.language ?? 'account')
   cfg = {
     apiUrl: String(options.api_url ?? 'https://anonym.legal').replace(/\/+$/, ''),
     apiKey: String(options.api_key ?? ''),
-    languages: parseLanguages(String(options.language ?? 'de')),
+    lang: parseLang(options.ui_language),
+    account: isAccountOption(languageOption),
+    languages: isAccountOption(languageOption) ? [] : parseLanguages(languageOption),
     preset: String(options.preset ?? ''),
     leakGuard: String(options.leak_guard ?? 'block'),
     encodedRuns: String(options.encoded_runs ?? 'scan'),
@@ -525,22 +558,31 @@ export const register: Register = (on, options) => {
     allowValues: new Set([...list(options.allow_values, ALLOW_DEFAULT)].map((v) => v.toLowerCase())),
     cache: new Map(),
   }
-  cfg.urlProblem = apiUrlProblem(cfg.apiUrl, options.allow_other_host === true)
+  cfg.urlProblem = apiUrlProblem(cfg.apiUrl, options.allow_other_host === true, cfg.lang)
   // Erlaubte Werte („Claude“) werden auch kein Namensteil mit eigenem Platzhalter.
   setAliasDeny(cfg.allowValues)
   // Der Zähler der eigenen Grenze bleibt über ein Neuladen bestehen: sonst höbe jedes Neuladen sie auf.
   serverPlan = undefined
+  accountUsed = undefined
   active = 0
   waiting.length = 0
   const { apiUrl, apiKey, preset, leakGuard, detokenizeBash, shellGuard } = cfg
-  const language = cfg.languages.join('+') || 'keine'
+  /** Die Erkennungssprachen für /pii: Konto (mit den Sprachen, sobald bekannt) oder die Codes aus der Option. */
+  const languageLine = () =>
+    cfg.account
+      ? accountUsed
+        ? t('langAccountKnown', { langs: accountUsed.join(', ') })
+        : t('langAccount')
+      : cfg.languages.length
+        ? t('langExplicit', { langs: cfg.languages.join('+') })
+        : t('langExplicit', { langs: t('langNone') })
 
   // ── Sitzung und Befehl ───────────────────────────────────────────────────
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'pii', description: 'anonym.legal: Stand der PII-Schutzschicht' })
-    const problem = !apiKey ? 'kein API-Schlüssel, Prompts werden blockiert' : cfg.urlProblem ? `${cfg.urlProblem}, Prompts werden blockiert` : undefined
-    $.ui.status(problem ? `anonym.legal: ${problem}` : 'anonym.legal: PII-Schutz aktiv')
+    await $.command.register({ name: 'pii', description: t('cmdDescription') })
+    const problem = !apiKey ? t('problemNoKey') : cfg.urlProblem ? t('problemUrl', { problem: cfg.urlProblem }) : undefined
+    $.ui.status(problem ? t('statusProblem', { problem }) : t('statusActive'))
     // Vorwärmen ohne zu warten: über einen Zeitgeber, damit die Arbeit den Start überdauert
     // (Referenz „Work that outlives a dispatch“).
     if (!problem) $.clock.after(0, () => void warm($).catch(() => undefined))
@@ -552,20 +594,22 @@ export const register: Register = (on, options) => {
     const s = await read($, statsAtom)
     const tainted = await read($, taintedAtom)
     const inWindow = rateWindow(sent, await $.clock.now(), Number.MAX_SAFE_INTEGER, RATE_WINDOW).times.length - 1
-    const types = Object.entries(v.counter).map(([t, n]) => `${t} ${n}`).join(', ') || 'keine'
+    const types = Object.entries(v.counter).map(([k, n]) => `${k} ${n}`).join(', ') || t('typesNone')
+    const state = !apiKey ? t('stateNoKey') : cfg.urlProblem ? t('stateOff', { problem: cfg.urlProblem }) : t('stateOn')
+    const plan = serverPlan === undefined ? t('planUnknown') : serverPlan ? t('planYes') : t('planNo')
     return {
       text: [
-        'Schutz gegen Versehen, nicht gegen eingeschleuste Anweisungen und nicht gegen Absicht.',
-        `anonym.legal PII-Schutz: ${!apiKey ? 'kein API-Schlüssel' : cfg.urlProblem ? `aus (${cfg.urlProblem})` : 'aktiv'} (${apiUrl}, Sprache ${language}${preset ? `, Voreinstellung ${preset}` : ''})`,
-        `Geprüfte Zeilen: ${s.scanned} · ersetzt: ${v.replaced} · verschiedene Werte: ${Object.keys(v.byToken).length} (${types}) · kodierte Abschnitte ersetzt: ${s.encoded ?? 0}`,
-        `Zurückgehalten: ${s.withheld} · Lecks in Anfragen: ${s.leaks}, davon gestoppt ${s.blocked}`,
-        `Schalter: shell_guard ${shellGuard} · encoded_runs ${cfg.encodedRuns} · leak_guard ${leakGuard} · file_values ${cfg.fileValues}`,
-        `Markierte Dateien: ${tainted.length} (der Mod hat dort beim Schreiben echte Werte eingesetzt)${tainted.length ? `: ${tainted.slice(0, 5).join(', ')}${tainted.length > 5 ? ' …' : ''}` : ''}`,
-        `Vorwärmen: ${s.warm ? Object.entries(s.warm).map(([l, r]) => `${l} ${r}`).join(' · ') : 'noch kein Ergebnis'}`,
-        `Anfragen im 5-Minuten-Fenster: ${inWindow} von ${RATE_LIMIT} · Sprachplan des Servers: ${serverPlan === undefined ? 'noch nicht gefragt' : serverPlan ? 'ja' : 'nein, Sprachen werden einzeln nachgeholt'}`,
+        t('limits'),
+        t('piiHead', { state, apiUrl, lang: languageLine(), preset: preset ? t('presetPart', { preset }) : '' }),
+        t('piiStats', { scanned: s.scanned, replaced: v.replaced, values: Object.keys(v.byToken).length, types, encoded: s.encoded ?? 0 }),
+        t('piiWithheld', { withheld: s.withheld, leaks: s.leaks, blocked: s.blocked }),
+        t('piiSwitches', { shell: shellGuard, encoded: cfg.encodedRuns, leak: leakGuard, files: cfg.fileValues }),
+        t('piiTainted', { n: tainted.length, list: tainted.length ? `: ${tainted.slice(0, 5).join(', ')}${tainted.length > 5 ? ' …' : ''}` : '' }),
+        t('piiWarm', { warm: s.warm ? Object.entries(s.warm).map(([l, r]) => `${l} ${r}`).join(' · ') : t('warmNone') }),
+        t('piiRate', { n: inWindow, limit: RATE_LIMIT, plan }),
         // 2.4: `session.start` bekommt kein Signal für eine fortgesetzte Sitzung.
-        'Die Zuordnung gilt nur für diese Sitzung. Nach `--resume` lassen sich alte Platzhalter nicht zurückübersetzen; Schreiben damit wird abgelehnt.',
-        s.lastError ? `Letzter Fehler: ${s.lastError}` : 'Kein Fehler.',
+        t('piiResume'),
+        s.lastError ? t('piiLastError', { err: s.lastError }) : t('piiNoError'),
       ].join('\n'),
     }
   })
@@ -580,9 +624,9 @@ export const register: Register = (on, options) => {
     try {
       content = await scrubBlocks($, e.message.content as Block[])
     } catch (err) {
-      const msg = String((err as Error)?.message ?? err)
-      await note($, (s) => ({ ...s, withheld: s.withheld + 1, lastError: msg }))
-      $.ui.log(`anonym.legal: eine Zeile (${e.door}) wurde zurückgehalten: ${msg}`)
+      const reason = String((err as Error)?.message ?? err)
+      await note($, (s) => ({ ...s, withheld: s.withheld + 1, lastError: reason }))
+      $.ui.log(t('logWithheld', { door: e.door, err: reason }))
       return next({ ...e, message: { ...e.message, content: withheld(e.message.content as Block[]) } })
     }
     await note($, (s) => ({ ...s, scanned: s.scanned + 1 }))
@@ -595,15 +639,15 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     if (e.command) return next(e)
-    if (!apiKey) return { drop: 'anonym.legal: kein API-Schlüssel eingetragen, der Prompt wurde nicht gesendet. /plugin → anonym-legal-guard → Configure.' }
-    if (cfg.urlProblem) return { drop: `anonym.legal: ${cfg.urlProblem}. Der Prompt wurde nicht gesendet. /plugin → anonym-legal-guard → Configure.` }
+    if (!apiKey) return { drop: t('dropNoKey') }
+    if (cfg.urlProblem) return { drop: t('dropUrl', { problem: cfg.urlProblem }) }
     try {
       await scrub($, e.text, true)
     } catch (err) {
-      return { drop: `anonym.legal: die PII-Prüfung ist fehlgeschlagen (${String((err as Error)?.message ?? err)}), der Prompt wurde nicht gesendet.` }
+      return { drop: t('dropFailed', { err: String((err as Error)?.message ?? err) }) }
     }
-    return next({ ...e, context: [...(e.context ?? []), HINT] })
-  }).catch(($, e, next) => (next.called ? next(e) : { drop: 'anonym.legal: die PII-Prüfung ist fehlgeschlagen, der Prompt wurde nicht gesendet.' }))
+    return next({ ...e, context: [...(e.context ?? []), t('hint')] })
+  }).catch(($, e, next) => (next.called ? next(e) : { drop: t('dropFailedShort') }))
 
   // ── 3. Kontext, Anhänge, System-Prompt, Agenten, Komprimieren ────────────
 
@@ -625,7 +669,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => (next.called ? next(e) : SECTIONS.test(e.name) ? { text: null } : next(e)))
 
   on('session.send', async ($, e, next) => next({ ...e, text: await scrub($, e.text) })).catch(($, e, next) =>
-    next.called ? next(e) : { isDelivered: false, reason: 'anonym.legal: die PII-Prüfung ist fehlgeschlagen' },
+    next.called ? next(e) : { isDelivered: false, reason: t('sendReason') },
   )
 
   on('session.compact', async ($, e, next) =>
@@ -638,7 +682,7 @@ export const register: Register = (on, options) => {
     // Streng-Modus: schreibende Werkzeuge mit Platzhaltern laufen nicht, statt
     // echte Werte auf die Platte zu schreiben. Lesen und Suchen bekommen weiter echte Werte.
     if (cfg.fileValues === 'deny' && WRITERS.has(String(e.tool)) && leftoverTokens(Object.fromEntries(Object.entries(e).filter(([k]) => !RESERVED.has(k)))).length) {
-      return { deny: STRICT_FILES }
+      return { deny: STRICT_FILES() }
     }
     const r = await restoreArgs($, e)
     if ('leftover' in r) return { deny: LEFTOVER(r.leftover) }
@@ -649,16 +693,16 @@ export const register: Register = (on, options) => {
       if (path) await update($, taintedAtom, (t) => (t.includes(path) ? t : [...t, path]))
     }
     return next(r)
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED }))
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED() }))
   if (detokenizeBash) {
     on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
       // Streng-Modus: auch ein Befehl setzt keine echten Werte ein (sonst schriebe `echo … > datei` sie doch).
       if (cfg.fileValues === 'deny' && leftoverTokens(Object.fromEntries(Object.entries(e).filter(([k]) => !RESERVED.has(k)))).length) {
-        return { deny: STRICT_FILES }
+        return { deny: STRICT_FILES() }
       }
       const r = await restoreArgs($, e)
       return 'leftover' in r ? { deny: LEFTOVER(r.leftover) } : next(r)
-    }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED }))
+    }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED() }))
   }
 
   // ── 4b. Befehle: ablehnen und nachfragen ──────────────────────────
@@ -669,14 +713,14 @@ export const register: Register = (on, options) => {
   if (shellGuard !== 'off') {
     on('tool.check', { tool: ['Bash', 'PowerShell', 'Monitor'] }, async ($, e, next) => {
       const command = commandOf(e.tool, e.input)
-      const v = command === undefined ? undefined : shellVerdict(command)
+      const v = command === undefined ? undefined : shellVerdict(command, cfg.lang)
       if (!v) return next(e)
       const action = shellGuard === 'ask' ? 'ask' : v.action
-      $.ui.log(`anonym.legal: Befehl ${action === 'deny' ? 'abgelehnt' : 'nachgefragt'} (${v.reason}).`)
-      if (action === 'deny') return { decision: 'deny', reason: `anonym.legal: Befehl abgelehnt (${v.reason}). ${NOT_A_LOCK}` }
+      $.ui.log(t(action === 'deny' ? 'logShellDenied' : 'logShellAsk', { reason: v.reason }))
+      if (action === 'deny') return { decision: 'deny', reason: `${t('shellDenied', { reason: v.reason })} ${t('notALock')}` }
       const below = await next(e)
-      return below.decision === 'deny' ? below : { decision: 'ask', reason: `anonym.legal: Befehl braucht deine Bestätigung (${v.reason}). ${NOT_A_LOCK}` }
-    }).catch(() => ({ decision: 'deny', reason: `anonym.legal: die Befehlsprüfung ist fehlgeschlagen, der Befehl lief nicht. ${NOT_A_LOCK}` }))
+      return below.decision === 'deny' ? below : { decision: 'ask', reason: `${t('shellAsk', { reason: v.reason })} ${t('notALock')}` }
+    }).catch(() => ({ decision: 'deny', reason: `${t('shellCheckFailed')} ${t('notALock')}` }))
   }
 
   // ── 4c. Ausgänge: Werkzeuge ohne echte Werte ─────────────
@@ -694,9 +738,9 @@ export const register: Register = (on, options) => {
       if (!leak) return next(e)
       const stop = leakGuard === 'block' && leak.strong
       await note($, (s) => ({ ...s, leaks: s.leaks + 1, blocked: s.blocked + (stop ? 1 : 0) }))
-      $.ui.log(`anonym.legal: ${String(e.tool)} sollte den Klartext zu ${leak.token} bekommen${stop ? ', Aufruf abgelehnt' : ' (nur gemeldet)'}.`)
-      return stop ? { deny: `${EGRESS_STOPPED} (${leak.token}). ${NOT_A_LOCK}` } : next(e)
-    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: `${EGRESS_STOPPED} (Prüfung fehlgeschlagen). ${NOT_A_LOCK}` } : next(e)))
+      $.ui.log(t(stop ? 'logEgressStop' : 'logEgressNote', { tool: String(e.tool), token: leak.token }))
+      return stop ? { deny: `${EGRESS_STOPPED()} (${leak.token}). ${t('notALock')}` } : next(e)
+    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: `${EGRESS_STOPPED()} (${t('checkFailed')}). ${t('notALock')}` } : next(e)))
   }
 
   // ── 5. Anzeige für den Menschen ──────────────────────────────────────────
@@ -716,16 +760,16 @@ export const register: Register = (on, options) => {
       // Zählanfragen tragen ungeschwärzten Inhalt großer Werkzeug-Ergebnisse: nie hinaus (2026-11-17).
       if (isTokenCountRequest(e.url)) {
         await note($, (s) => ({ ...s, blocked: s.blocked + 1 }))
-        return { deny: TOKEN_COUNT_WITHHELD }
+        return { deny: TOKEN_COUNT_WITHHELD() }
       }
       // Geprüft werden URL und Körper; eine Anfrage ohne Körper über die URL allein.
       const leak = requestLeak(e.url, e.init?.body, await read($, vaultAtom))
-      if (leak && 'unreadable' in leak) return leakGuard === 'block' ? { deny: `${LEAK_STOPPED} (Körper nicht lesbar)` } : next(e)
+      if (leak && 'unreadable' in leak) return leakGuard === 'block' ? { deny: `${LEAK_STOPPED()} (${t('bodyUnreadable')})` } : next(e)
       if (!leak) return next(e)
       const stop = leakGuard === 'block' && leak.strong
       await note($, (s) => ({ ...s, leaks: s.leaks + 1, blocked: s.blocked + (stop ? 1 : 0) }))
-      $.ui.log(`anonym.legal: in einer Anfrage ans Modell steht der Klartext zu ${leak.token}${stop ? ', Anfrage gestoppt' : ' (nur gemeldet)'}.`)
-      return stop ? { deny: LEAK_STOPPED } : next(e)
-    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: `${LEAK_STOPPED} (Prüfung fehlgeschlagen)` } : next(e)))
+      $.ui.log(t(stop ? 'logLeakStop' : 'logLeakNote', { token: leak.token }))
+      return stop ? { deny: LEAK_STOPPED() } : next(e)
+    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: `${LEAK_STOPPED()} (${t('checkFailed')})` } : next(e)))
   }
 }

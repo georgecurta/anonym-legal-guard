@@ -2,6 +2,7 @@
 // Kein `$`, kein Netz: alles hier ist mit festen Eingaben testbar.
 
 import type { Vault } from '../types'
+import { msg, type Lang } from './messages'
 
 /** Ein Treffer der Erkennung, wie `/api/mcp/analyze` ihn liefert: Offsets in Codepunkten. */
 export type Entity = { entity_type: string; start?: number; end?: number; text: string; score: number }
@@ -214,6 +215,12 @@ export function parseLanguages(option: string): string[] {
   return [...new Set(expanded)].filter((l) => /^[a-z]{2,3}(-[a-z0-9]+)?$/.test(l)).slice(0, 3)
 }
 
+/** Kontomodus: die Option ist leer oder `account`; der Mod schickt dann keine Sprache, der Server nimmt die des Kontos. */
+export function isAccountOption(option: string): boolean {
+  const v = option.trim().toLowerCase()
+  return v === '' || v === 'account'
+}
+
 /** Zurückübersetzen in einem beliebigen JSON-Wert: jede Zeichenkette, auch verschachtelt. */
 export function detokenizeDeep<T>(value: T, vault: Vault): T {
   if (typeof value === 'string') return detokenize(value, vault) as T
@@ -407,7 +414,7 @@ export function findLeak(text: string, vault: Vault): { token: string; strong: b
 // ── Ausgabeseite: kodierte Abschnitte ────────────────────────────────
 
 /** Ersatztext für einen kodierten Abschnitt mit erkannten oder bekannten Daten. */
-export const ENCODED_WITHHELD = '[anonym.legal: kodierter Abschnitt zurückgehalten]'
+export const ENCODED_WITHHELD = msg('en', 'encodedWithheld')
 
 /** Ein Abschnitt aus base64-, base64url- oder Hex-Zeichen; `start`/`end` in UTF-16-Einheiten. */
 export type EncodedRun = { start: number; end: number; decoded: string | null }
@@ -690,7 +697,7 @@ export function replaceSpans(text: string, spans: ReadonlyArray<{ start: number;
 // ── Befehle: ablehnen und nachfragen ─────────────────────────────────
 
 /** Satz, den jede Ablehnung und jede Nachfrage des Mods trägt. */
-export const NOT_A_LOCK = 'Schutz gegen Versehen, keine Sperre gegen Absicht.'
+export const NOT_A_LOCK = msg('en', 'notALock')
 
 export type ShellVerdict = { action: 'deny' | 'ask'; reason: string }
 
@@ -859,7 +866,7 @@ type Where = { piped: boolean; pipeAfter: boolean; producer: string; redirectIn:
  * Netcat. Nachgefragt wird bei `scp`, `sftp`, `rsync` zu einem Host und `tar c … |`. Das ist eine
  * Liste gängiger Befehle, keine Sperre: eigene Skripte und andere Wege gehen durch.
  */
-export function shellVerdict(input: string): ShellVerdict | undefined {
+export function shellVerdict(input: string, lang: Lang = 'en'): ShellVerdict | undefined {
   const deny = (reason: string): ShellVerdict => ({ action: 'deny', reason })
   const command = stripNonCode(input)
   const masked = maskQuotes(command)
@@ -903,13 +910,13 @@ export function shellVerdict(input: string): ShellVerdict | undefined {
       if (!head.name) continue
       const pipeAfter = pieces.slice(k + 1).some((x) => x.sep === '|' || x.sep === '|&')
       const where: Where = { piped, pipeAfter, producer, redirectIn, masked: masked.slice(piece.start, piece.end) }
-      let v = judge(head.name, head.args, where)
+      let v = judge(head.name, head.args, where, lang)
       if (!v && head.name === 'find') {
         // `find … -exec programm {} \;` startet das Programm mit Dateien als Eingabe.
         const i = head.args.findIndex((a) => /^-(exec|execdir|ok|okdir)$/.test(a))
         if (i >= 0) {
           const inner = commandName(head.args.slice(i + 1))
-          if (inner.name) v = judge(inner.name, inner.args, { ...where, piped: true, producer: 'find' })
+          if (inner.name) v = judge(inner.name, inner.args, { ...where, piped: true, producer: 'find' }, lang)
         }
       }
       if (v?.action === 'deny') return v
@@ -919,7 +926,7 @@ export function shellVerdict(input: string): ShellVerdict | undefined {
   return ask
 }
 
-function judge(name: string, args: string[], where: Where): ShellVerdict | undefined {
+function judge(name: string, args: string[], where: Where, lang: Lang): ShellVerdict | undefined {
   const deny = (reason: string): ShellVerdict => ({ action: 'deny', reason })
   const flag = (re: RegExp) => args.some((a) => re.test(a))
   if (['base64', 'base32', 'basenc'].includes(name)) {
@@ -930,9 +937,9 @@ function judge(name: string, args: string[], where: Where): ShellVerdict | undef
       if (a === '-w' || a === '--wrap') j++
       else if (a !== '-' && !a.startsWith('-')) files.push(a)
     }
-    if (where.redirectIn) return deny(`${name} mit Umleitung aus einer Datei`)
-    if (files.length) return deny(`${name} mit einer Datei als Eingabe`)
-    if (where.piped && !fixedEcho(where.producer)) return deny(`${name} mit einem Rohr als Eingabe`)
+    if (where.redirectIn) return deny(msg(lang, 'shellFileRedirect', { name }))
+    if (files.length) return deny(msg(lang, 'shellFileInput', { name }))
+    if (where.piped && !fixedEcho(where.producer)) return deny(msg(lang, 'shellPipeInput', { name }))
     return undefined
   }
   if (['xxd', 'od', 'hexdump', 'hd', 'rev', 'format-hex', 'fhx'].includes(name)) return deny(name)
@@ -948,17 +955,17 @@ function judge(name: string, args: string[], where: Where): ShellVerdict | undef
     return undefined
   }
   if (name === 'curl') {
-    if (flag(/^@|=@|^-[a-zA-Z]*[dF]@|^-[a-zA-Z]*T$|^--upload-file/)) return deny('curl mit Datei-Versand')
+    if (flag(/^@|=@|^-[a-zA-Z]*[dF]@|^-[a-zA-Z]*T$|^--upload-file/)) return deny(msg(lang, 'shellCurlFile'))
     return undefined
   }
   if (name === 'wget') {
-    if (flag(/^--(post|body)-file/)) return deny('wget mit Datei-Versand')
+    if (flag(/^--(post|body)-file/)) return deny(msg(lang, 'shellWgetFile'))
     return undefined
   }
   if (['nc', 'ncat', 'netcat'].includes(name)) return deny(name)
   if (['invoke-webrequest', 'invoke-restmethod', 'iwr', 'irm'].includes(name) && flag(/^-InFile$/i)) return deny(`${name} -InFile`)
   if (name === 'sftp') return { action: 'ask', reason: 'sftp' }
-  if ((name === 'scp' || name === 'rsync') && args.some(isRemote)) return { action: 'ask', reason: `${name} zu einem Host` }
+  if ((name === 'scp' || name === 'rsync') && args.some(isRemote)) return { action: 'ask', reason: msg(lang, 'shellRemote', { name }) }
   if (name === 'tar' && where.pipeAfter && (/^[^-]*c/.test(args[0] ?? '') || flag(/^(--create|-[a-zA-Z]*c[a-zA-Z]*)$/))) return { action: 'ask', reason: 'tar c … |' }
   return undefined
 }
@@ -980,15 +987,15 @@ export function rateWindow(times: readonly number[], now: number, limit: number,
  * Warum `api_url` nicht benutzt wird, oder `undefined`: nur `https:`, und ein anderer
  * Host als anonym.legal nur mit `allow_other_host`.
  */
-export function apiUrlProblem(url: string, allowOtherHost: boolean): string | undefined {
+export function apiUrlProblem(url: string, allowOtherHost: boolean, lang: Lang = 'en'): string | undefined {
   let u: URL
   try {
     u = new URL(url)
   } catch {
-    return `api_url ist keine gültige Adresse (${url})`
+    return msg(lang, 'urlInvalid', { url })
   }
-  if (u.protocol !== 'https:') return `api_url muss mit https: beginnen, nicht mit ${u.protocol}`
-  if (u.hostname !== 'anonym.legal' && !allowOtherHost) return `api_url zeigt auf ${u.hostname}, nicht auf anonym.legal; dafür muss die Option allow_other_host an sein`
+  if (u.protocol !== 'https:') return msg(lang, 'urlHttps', { protocol: u.protocol })
+  if (u.hostname !== 'anonym.legal' && !allowOtherHost) return msg(lang, 'urlHost', { host: u.hostname })
   return undefined
 }
 

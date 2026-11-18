@@ -15,6 +15,7 @@ import {
   encodedRuns,
   emptyVault,
   findLeak,
+  isAccountOption,
   leftoverTokens,
   parseLanguages,
   plausible,
@@ -25,8 +26,10 @@ import {
   tokenFor,
   type Entity,
 } from '../hooks/core'
+import { msg, parseLang } from '../hooks/messages'
 
-const OPTIONS = { options: { api_key: 'test-key', api_url: 'https://pii.example', allow_other_host: true } }
+// Die Tests prüfen den deutschen Wortlaut und die feste Sprache de; Englisch und Kontomodus haben eigene Tests unten.
+const OPTIONS = { options: { api_key: 'test-key', api_url: 'https://pii.example', allow_other_host: true, ui_language: 'de', language: 'de' } }
 const NAME = 'Anna Berg'
 const MAIL = 'anna.berg@example.org'
 /** Ein Platzhalter des Mods, gleich welcher Sitzungs-Tag. */
@@ -1054,7 +1057,7 @@ test('jede Anfrage trägt die Kopfzeile X-Client-Version', DE_EN, async ($, on) 
   const sent = langAnalyzer(on, false)
   await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'h1', content: `${NAME} <${MAIL}>` }]) as never)
   expect(sent.length).toBe(2)
-  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.6.2')).toBe(true)
+  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.7.0')).toBe(true)
 })
 
 // ── Wartezeiten ─────────────────────────────────────────────────
@@ -1188,14 +1191,14 @@ test('400 UNSUPPORTED_LANGUAGE nennt die Sprache', { options: { ...OPTIONS.optio
   expect('drop' in r && String(r.drop).includes('Sprache xx wird vom Server nicht unterstützt')).toBe(true)
 })
 
-test('api_url nur mit https; jeder Prompt wird mit klarer Meldung verworfen, nichts geht hinaus', { options: { api_key: 'k', api_url: 'http://anonym.legal' } }, async ($, on) => {
+test('api_url nur mit https; jeder Prompt wird mit klarer Meldung verworfen, nichts geht hinaus', { options: { api_key: 'k', ui_language: 'de', language: 'de', api_url: 'http://anonym.legal' } }, async ($, on) => {
   const calls = fakeAnalyzer(on)
   const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
   expect('drop' in r && String(r.drop).includes('https:')).toBe(true)
   expect(calls.length).toBe(0)
 })
 
-test('ein anderer Host als anonym.legal nur mit allow_other_host', { options: { api_key: 'k', api_url: 'https://staging.example' } }, async ($, on) => {
+test('ein anderer Host als anonym.legal nur mit allow_other_host', { options: { api_key: 'k', ui_language: 'de', language: 'de', api_url: 'https://staging.example' } }, async ($, on) => {
   const session = mock.session(on)
   const calls = fakeAnalyzer(on)
   const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
@@ -1205,7 +1208,7 @@ test('ein anderer Host als anonym.legal nur mit allow_other_host', { options: { 
   expect(calls.length).toBe(0)
 })
 
-test('ein anderer Host mit allow_other_host: true wird benutzt', { options: { api_key: 'k', api_url: 'https://staging.example', allow_other_host: true } }, async ($, on) => {
+test('ein anderer Host mit allow_other_host: true wird benutzt', { options: { api_key: 'k', ui_language: 'de', language: 'de', api_url: 'https://staging.example', allow_other_host: true } }, async ($, on) => {
   const engine: string[] = []
   on('http.fetch', (_$, e) => {
     engine.push(e.url)
@@ -1313,4 +1316,236 @@ test('G: Streng-Modus mit detokenize_bash: ein Befehl mit Platzhalter läuft nic
   const r = await $.tool.call({ tool: 'Bash', command: `echo '${token}' >> notiz.txt` } as never)
   expect('deny' in r && String(r.deny).includes('Streng-Modus')).toBe(true)
   expect(seen.length).toBe(0)
+})
+
+// ── 0.7.0: Meldungen en/de und Erkennungssprache aus dem Konto ──────────────
+
+/** Ohne `ui_language` (Standard: en) und ohne `language` (Standard: account). */
+const BASE = { api_key: 'test-key', api_url: 'https://pii.example', allow_other_host: true }
+const ENGLISH = { options: { ...BASE, language: 'de' } }
+const GERMAN = { options: { ...BASE, language: 'de', ui_language: 'de' } }
+const ACCOUNT = { options: { ...BASE } }
+
+type Body = { text: string; language?: string; languages?: string[]; output_mode?: string; preset?: string }
+
+/**
+ * Ein Server, der NAME und MAIL findet. `used` ist `languages_used` (nicht gesetzt: die Antwort hat es nicht),
+ * `status` ein Fehlerstatus statt der Antwort. Gemerkt werden die Körper und die Zeilen der Statuszeile.
+ */
+function server(on: On, o: { used?: string[]; status?: number; clock?: boolean } = {}) {
+  const bodies: Body[] = []
+  const statuses: string[] = []
+  on('http.fetch', (_$, e) => {
+    if (!e.url.endsWith('/api/mcp/analyze')) return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
+    const b = JSON.parse(String(e.init?.body ?? '{}')) as Body
+    bodies.push(b)
+    if (o.status) return { value: { status: o.status, ok: false, headers: {}, text: '{}' } }
+    const entities: Entity[] = []
+    for (const [needle, type] of [[NAME, 'PERSON'], [MAIL, 'EMAIL_ADDRESS']] as const) {
+      const at = b.text.indexOf(needle)
+      if (at >= 0) {
+        const from = Array.from(b.text.slice(0, at)).length
+        entities.push({ entity_type: type, start: from, end: from + Array.from(needle).length, text: needle, score: 0.9 })
+      }
+    }
+    const metadata: Record<string, unknown> = { language: b.language }
+    if (o.used) metadata.languages_used = o.used
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ success: true, entities, metadata }) } }
+  })
+  on('ui.status', (_$, e) => {
+    statuses.push(JSON.stringify(e))
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  // Mit `clock` übernimmt der Test die Uhr (Zeitgeber des Vorwärmens), sonst steht sie fest.
+  const clock = o.clock ? mock.clock(on) : undefined
+  if (!clock) on('clock.now', () => ({ value: 1_000_000 }))
+  return { bodies, statuses, clock }
+}
+
+async function startSession($: { session: { start: (a: never) => Promise<unknown> } }, on: On, clock: ReturnType<typeof mock.clock> | undefined) {
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/x', surface: null, isInteractive: false } as never)
+  await clock?.settle()
+}
+
+test('Standard ohne ui_language: Statuszeile und /pii sind englisch, nichts Deutsches (Gegenprobe)', ENGLISH, async ($, on) => {
+  const { statuses, clock } = server(on, { clock: true })
+  await startSession($ as never, on, clock)
+  expect(statuses.some((s) => s.includes('anonym.legal: PII protection active'))).toBe(true)
+  expect(statuses.some((s) => s.includes('PII-Schutz aktiv'))).toBe(false)
+  const text = await pii($)
+  expect(text.split('\n')[0]).toBe('Protection against accidents, not against injected instructions and not against intent.')
+  expect(text.includes('Schutz gegen Versehen')).toBe(false)
+  expect(text.includes('The mapping applies to this session only.')).toBe(true)
+})
+
+test('Ohne API-Schlüssel steht in der Statuszeile englisch „no API token, prompts are blocked“', { options: { language: 'de' } }, async ($, on) => {
+  const { statuses, clock } = server(on, { clock: true })
+  await startSession($ as never, on, clock)
+  expect(statuses.some((s) => s.includes('anonym.legal: no API token, prompts are blocked'))).toBe(true)
+})
+
+test('ui_language de: Statuszeile und /pii sind deutsch, nichts Englisches (Gegenprobe)', GERMAN, async ($, on) => {
+  const { statuses, clock } = server(on, { clock: true })
+  await startSession($ as never, on, clock)
+  expect(statuses.some((s) => s.includes('anonym.legal: PII-Schutz aktiv'))).toBe(true)
+  expect(statuses.some((s) => s.includes('PII protection active'))).toBe(false)
+  const text = await pii($)
+  expect(text.split('\n')[0]).toBe('Schutz gegen Versehen, nicht gegen eingeschleuste Anweisungen und nicht gegen Absicht.')
+  expect(text.includes('Protection against accidents')).toBe(false)
+})
+
+test('ui_language mit unbekanntem Wert ergibt Englisch', { options: { ...BASE, language: 'de', ui_language: 'fr' } }, async ($, on) => {
+  server(on)
+  expect((await pii($)).startsWith('Protection against accidents')).toBe(true)
+})
+
+for (const [status, en, de] of [
+  [401, 'Token invalid (HTTP 401)', 'Token ungültig (HTTP 401)'],
+  [402, 'No tokens left (HTTP 402)', 'Guthaben leer (HTTP 402)'],
+  [403, 'Plan without access to the mod (HTTP 403; the mod is part of Basic, Pro and Business)', 'Tarif ohne Zugang zum Mod (HTTP 403'],
+] as const) {
+  test(`HTTP ${status}: der Grund ist standardmäßig englisch`, ENGLISH, async ($, on) => {
+    server(on, { status })
+    const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+    expect('drop' in r && String(r.drop).includes(en)).toBe(true)
+    expect('drop' in r && String(r.drop).includes(de)).toBe(false)
+    expect('drop' in r && String(r.drop).includes('the prompt was not sent')).toBe(true)
+  })
+  test(`HTTP ${status}: mit ui_language de ist der Grund deutsch`, GERMAN, async ($, on) => {
+    server(on, { status })
+    const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+    expect('drop' in r && String(r.drop).includes(de)).toBe(true)
+    expect('drop' in r && String(r.drop).includes(en)).toBe(false)
+  })
+}
+
+test('shell_guard: die Ablehnung ist standardmäßig englisch', ENGLISH, async ($, on) => {
+  server(on)
+  runner(on)
+  const v = await $.tool.check({ tool: 'Bash', input: { command: 'base64 notiz.txt' } })
+  expect(v.decision).toBe('deny')
+  expect(String(v.reason)).toBe('anonym.legal: command rejected (base64 with a file as input). Protection against accidents, not a lock against intent.')
+})
+
+test('shell_guard mit ui_language de: deutsche Ablehnung und Nachfrage', GERMAN, async ($, on) => {
+  server(on)
+  runner(on)
+  const v = await $.tool.check({ tool: 'Bash', input: { command: 'base64 notiz.txt' } })
+  expect(String(v.reason)).toBe('anonym.legal: Befehl abgelehnt (base64 mit einer Datei als Eingabe). Schutz gegen Versehen, keine Sperre gegen Absicht.')
+  const a = await $.tool.check({ tool: 'Bash', input: { command: 'scp notiz.txt host:' } })
+  expect(String(a.reason).startsWith('anonym.legal: Befehl braucht deine Bestätigung (scp zu einem Host)')).toBe(true)
+})
+
+test('Zurückgehaltene Zeile: der Ersatztext ist standardmäßig englisch', ENGLISH, async ($, on) => {
+  const session = mock.session(on)
+  server(on, { status: 503 })
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'e1', content: `Kunde: ${NAME}` }]) as never)
+  const block = session.appended().at(-1)!.message.content[0] as unknown as { content: string }
+  expect(block.content).toBe('[anonym.legal: content withheld, the PII check failed]')
+})
+
+test('Standard für language ist account: kein language und kein languages im Körper, die Treffer werden ersetzt', ACCOUNT, async ($, on) => {
+  const session = mock.session(on)
+  const { bodies } = server(on, { used: ['de', 'en'] })
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'a1', content: `${NAME} <${MAIL}>` }]) as never)
+  expect(bodies.length).toBe(1)
+  expect('language' in bodies[0]!).toBe(false)
+  expect('languages' in bodies[0]!).toBe(false)
+  expect(bodies[0]?.output_mode).toBe('full')
+  const stored = textOf(session.appended().at(-1)!)
+  expect(stored.includes(NAME) || stored.includes(MAIL)).toBe(false)
+  expect(TOK('PERSON').test(stored)).toBe(true)
+})
+
+test('language leer und account bedeuten dasselbe; ein Preset bleibt im Körper', { options: { ...BASE, language: '', preset: 'developer' } }, async ($, on) => {
+  mock.session(on)
+  const { bodies } = server(on, { used: ['de'] })
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'a2', content: `Kunde ${NAME}` }]) as never)
+  expect(bodies.length).toBe(1)
+  expect(bodies[0]?.language).toBe(undefined)
+  expect(bodies[0]?.languages).toBe(undefined)
+  expect(bodies[0]?.preset).toBe('developer')
+})
+
+test('Kontomodus: Antwort ohne languages_used wird zurückgehalten, die Meldung nennt den Grund', ACCOUNT, async ($, on) => {
+  const session = mock.session(on)
+  server(on)
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'a3', content: `Kunde: ${NAME}` }]) as never)
+  const block = session.appended().at(-1)!.message.content[0] as unknown as { content: string }
+  expect(block.content.includes(NAME)).toBe(false)
+  expect(block.content.includes('withheld')).toBe(true)
+  const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+  expect('drop' in r && String(r.drop).includes('The server does not support language: account yet; set languages, e.g. de')).toBe(true)
+})
+
+test('Kontomodus mit ui_language de: deutsche Meldung bei fehlendem languages_used', { options: { ...BASE, ui_language: 'de' } }, async ($, on) => {
+  server(on)
+  const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+  expect('drop' in r && String(r.drop).includes('Der Server kennt language: account noch nicht; Sprachen eintragen, z. B. de')).toBe(true)
+})
+
+test('Kontomodus: leere languages_used werden zurückgehalten', ACCOUNT, async ($, on) => {
+  const session = mock.session(on)
+  server(on, { used: [] })
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'a4', content: `Kunde: ${NAME}` }]) as never)
+  const block = session.appended().at(-1)!.message.content[0] as unknown as { content: string }
+  expect(block.content.includes(NAME)).toBe(false)
+  expect(block.content.includes('withheld')).toBe(true)
+  const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+  expect('drop' in r && String(r.drop).includes('reported no detection languages')).toBe(true)
+})
+
+test('Kontomodus: Vorwärmen macht eine Anfrage ohne Sprache; /pii und Statuszeile zeigen die Kontosprachen', ACCOUNT, async ($, on) => {
+  const { bodies, statuses, clock } = server(on, { used: ['de', 'en'], clock: true })
+  await startSession($ as never, on, clock)
+  expect(bodies.length).toBe(1)
+  expect('language' in bodies[0]!).toBe(false)
+  expect('languages' in bodies[0]!).toBe(false)
+  const text = await pii($)
+  expect(text.includes('languages: account (de, en)')).toBe(true)
+  expect(text.includes('Warm-up: account ready: de,en')).toBe(true)
+  expect(statuses.some((s) => s.includes('languages: account (de, en)'))).toBe(true)
+})
+
+test('Kontomodus mit ui_language de: /pii nennt Sprache: Konto (de, en), Vorwärmen bereit: de,en', { options: { ...BASE, ui_language: 'de' } }, async ($, on) => {
+  const { clock } = server(on, { used: ['de', 'en'], clock: true })
+  await startSession($ as never, on, clock)
+  const text = await pii($)
+  expect(text.includes('Sprache: Konto (de, en)')).toBe(true)
+  expect(text.includes('Vorwärmen: account bereit: de,en')).toBe(true)
+})
+
+test('Kontomodus: vor der ersten Antwort heißt es nur account', ACCOUNT, async ($, on) => {
+  server(on)
+  expect((await pii($)).includes('languages: account)')).toBe(true)
+})
+
+test('Kontomodus: scheitert das Vorwärmen, steht der Fehler unter account', ACCOUNT, async ($, on) => {
+  const { clock } = server(on, { clock: true })
+  await startSession($ as never, on, clock)
+  expect((await pii($)).includes('Warm-up: account The server does not support language: account yet')).toBe(true)
+})
+
+test('feste Sprachen bleiben unverändert: language de,en schickt language und languages, kein Kontomodus', { options: { ...BASE, language: 'de,en' } }, async ($, on) => {
+  mock.session(on)
+  const { bodies } = server(on, { used: ['de', 'en'] })
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'a5', content: `${NAME} <${MAIL}>` }]) as never)
+  expect(bodies[0]?.language).toBe('de')
+  expect(bodies[0]?.languages).toEqual(['de', 'en'])
+})
+
+test('Kern: isAccountOption, parseLanguages, parseLang, msg', () => {
+  expect(isAccountOption('account')).toBe(true)
+  expect(isAccountOption(' Account ')).toBe(true)
+  expect(isAccountOption('')).toBe(true)
+  expect(isAccountOption('de')).toBe(false)
+  expect(isAccountOption('auto')).toBe(false)
+  expect(parseLanguages('account')).toEqual([])
+  expect(parseLanguages('auto')).toEqual(['de', 'en'])
+  expect(msg('xx' as never, 'notALock')).toBe('Protection against accidents, not a lock against intent.')
+  expect(parseLang('DE')).toBe('de')
+  expect(parseLang(undefined)).toBe('en')
 })

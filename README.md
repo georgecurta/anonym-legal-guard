@@ -51,8 +51,13 @@ In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add 
 ### 3. Enter the token
 
 Right after the install, Claude Code shows the mod's options. Paste the token into
-**anonym.legal API-Schlüssel** (`api_key`) and save. Leave the other options as they are; `language` is
-`de` by default, set it to `de,en` if your project mixes German and English.
+**API token (anonym.legal)** (`api_key`) and save. Two more choices in the same dialog:
+
+- **Interface language** (`ui_language`): `en` (default) or `de` for the mod's messages, status line and `/pii`.
+- **Detection languages** (`language`): `account` (default) uses the automatic detection languages saved in
+  your anonym.legal account (Settings → Language). Or enter codes, for example `de` or `de,en`.
+
+Leave the other options as they are.
 
 To enter or change the token later:
 
@@ -65,20 +70,56 @@ files, so it does not end up in a git repository.
 
 ### 4. Check that it works
 
-Start a new Claude Code session. The status line shows `anonym.legal: PII-Schutz aktiv`; without a token
-it shows `anonym.legal: kein API-Schlüssel, Prompts werden blockiert`. Type `/pii` at any time: it shows
-`anonym.legal PII-Schutz: aktiv (https://anonym.legal, Sprache de)`, what the mod has replaced in this
-session and whether anonym.legal answered.
+Start a new Claude Code session. The status line shows `anonym.legal: PII protection active`; without a
+token it shows `anonym.legal: no API token, prompts are blocked`. Type `/pii` at any time: it shows
+`anonym.legal PII protection: active (https://anonym.legal, languages: account (de, en))`, what the mod has
+replaced in this session and whether anonym.legal answered.
 
 If the token is missing, wrong or the plan has no access, every prompt is withheld with a message saying
-why (messages are in German for now):
+why:
 
 | Message | Meaning | What to do |
 |---|---|---|
-| `kein API-Schlüssel eingetragen` | no token entered | step 3 |
-| `Token ungültig (HTTP 401)` | token wrong or regenerated | copy the current token again (step 1, 3) |
-| `Tarif ohne Zugang zum Mod (HTTP 403 …)` | Free plan | choose Basic, Pro or Business |
-| `Guthaben leer (HTTP 402)` | no tokens left this month | buy tokens or wait for the next month |
+| `no API token set` | no token entered | step 3 |
+| `Token invalid (HTTP 401)` | token wrong or regenerated | copy the current token again (step 1, 3) |
+| `Plan without access to the mod (HTTP 403 …)` | Free plan | choose Basic, Pro or Business |
+| `No tokens left (HTTP 402)` | no tokens left this month | buy tokens or wait for the next month |
+| `The server reported no detection languages for this account` | `account` found no language | set languages in your account or enter codes in `language` |
+
+With `ui_language: de` the same messages appear in German.
+
+## Update
+
+Claude Code does not update the mod on its own unless you switch on auto-update for this marketplace.
+
+- From a shell:
+
+  ```
+  claude plugin marketplace update anonym-legal
+  claude plugin update anonym-legal-guard
+  ```
+
+- In a Claude Code session: type `/plugin`, open **Marketplaces**, choose **anonym-legal** and **Update**; there you
+  can also switch on **auto-update**.
+
+Restart Claude Code afterwards; `claude plugin list` shows the installed version. Your token and options stay as they are.
+New options in a new version start with their default value.
+
+## Uninstall
+
+- From a shell (use `--scope project` if you installed it for one project only):
+
+  ```
+  claude plugin uninstall anonym-legal-guard
+  claude plugin marketplace remove anonym-legal
+  ```
+
+- In a Claude Code session: type `/plugin`, choose **anonym-legal-guard**, then **Uninstall**.
+- To switch it off for a while instead: `claude plugin disable anonym-legal-guard` (`enable` turns it back on).
+
+Restart Claude Code afterwards. From then on prompts go to the model **without** replacement. If you no longer want
+the token to work, click **Regenerate** under Settings → Developer on anonym.legal; that also stops the old token in
+the Chrome extension. Your anonym.legal account and plan stay as they are.
 
 ## What it does
 
@@ -114,21 +155,23 @@ keep it.
 - **After `--resume`,** old placeholders cannot be translated back; writing with them is refused.
 - **Team and Enterprise sign-ins:** Claude Code can run its own built-in guard first; a mod you install
   yourself may then not see every input. For organisations, deploy it as a managed mod.
-- **Languages:** set `language` to the languages of your texts, for example `de` or `de,en` (at most three).
+- **Languages:** by default the mod uses your account's detection languages (`account`); or set `language` to
+  the languages of your texts, for example `de` or `de,en` (at most three).
   Each extra language checks every text again and costs tokens. Since 2026-11-18 the server keeps a name hit
   only in sentences of its own language: measured on German text with `de,en`, ordinary words such as
   "Vorgang" or "Befund" were no longer replaced, and English names in the same text were found. Before that
   fix such words were replaced; detection still misses things in either setting.
 - **Token counting:** Claude Code counts large tool results with a separate request before the mod has seen
   them. The mod does not let that request out; Claude Code then works without the count.
-- **Messages are in German** for now.
+- **Interface languages:** English (default) and German. The option labels in Claude Code's dialog are English.
 
 ## Options
 
 | Option | Default | Meaning |
 |---|---|---|
 | `api_key` | – | your anonym.legal API token (stored as a secret) |
-| `language` | `de` | detection language; one language is best (see Limits) |
+| `ui_language` | `en` | language of messages, status line and `/pii`: `en` or `de` |
+| `language` | `account` | detection languages: `account` (from your anonym.legal account) or codes such as `de`, `de,en` |
 | `leak_guard` | `block` | `block` stops clear leaks, `log` only reports, `off` |
 | `shell_guard` | `block` | `block` refuses encoders and uploads, `ask` asks for everything, `off` |
 | `encoded_runs` | `scan` | `scan` checks decodable sections, `strict` also withholds long binary runs, `off` |
