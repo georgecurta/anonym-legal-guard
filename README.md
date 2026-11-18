@@ -69,9 +69,11 @@ keep it.
 - **After `--resume`,** old placeholders cannot be translated back; writing with them is refused.
 - **Team and Enterprise sign-ins:** Claude Code can run its own built-in guard first; a mod you install
   yourself may then not see every input. For organisations, deploy it as a managed mod.
-- **One language works best.** Set `language` to the language of your texts (`de` or `en`). With several
-  languages each model runs on the whole text, and a model on text in another language finds ordinary words
-  as names: measured on German text with `de,en`, words such as "Vorgang" and "Befund" were replaced.
+- **Languages:** set `language` to the languages of your texts, for example `de` or `de,en` (at most three).
+  Each extra language checks every text again and costs tokens. Since 2026-11-18 the server keeps a name hit
+  only in sentences of its own language: measured on German text with `de,en`, ordinary words such as
+  "Vorgang" or "Befund" were no longer replaced, and English names in the same text were found. Before that
+  fix such words were replaced; detection still misses things in either setting.
 - **Token counting:** Claude Code counts large tool results with a separate request before the mod has seen
   them. The mod does not let that request out; Claude Code then works without the count.
 - **Messages are in German** for now.
