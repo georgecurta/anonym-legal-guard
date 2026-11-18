@@ -12,28 +12,73 @@ numbers and more) with placeholders such as `‹PERSON_1·k7p›`. You keep read
 ## Requirements
 
 - Claude Code **2.1.325** or later (the mod API is early access and changes between versions).
-- An anonym.legal account on **Basic, Pro or Business** and its API token
-  ([create one in your account](https://anonym.legal)). Every check is billed in tokens like an API call.
+- An anonym.legal account on **Basic, Pro or Business** and its API token (see step 1). Every check is
+  billed in tokens like an API call.
 
 ## Install
 
-At the prompt of a terminal session:
+### 1. Get your API token from anonym.legal
+
+1. Sign in at [anonym.legal](https://anonym.legal/auth/signin). No account yet? Register, then choose
+   Basic, Pro or Business under [Pricing](https://anonym.legal/pricing). A Free account has no API token.
+2. Open **Settings → Developer**: [anonym.legal/app/settings?tab=developer](https://anonym.legal/app/settings?tab=developer).
+3. The card **API Access Token** shows your token. It is created the first time you open the tab.
+4. Click the **copy** button next to the token.
+
+Keep the token secret: anyone who has it can use your account's tokens. **Regenerate** gives you a new
+token and stops the old one at once, also in the anonym.legal Chrome extension, which uses the same token.
+
+### 2. Install the mod
+
+At the prompt of a Claude Code terminal session:
 
 ```
 /plugin install anonym-legal-guard --marketplace georgecurta/anonym-legal-guard
 ```
 
-From a shell:
+Or from a shell:
 
 ```
 claude plugin install anonym-legal-guard --marketplace georgecurta/anonym-legal-guard
 ```
 
-Answer `y` to add the marketplace, pick a scope, then enter your API token on the options screen. In the
-desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `georgecurta/anonym-legal-guard`, then
-**Add plugin**.
+Answer `y` to add the marketplace, then pick a scope: **user** (all your projects) or **project** (only
+the current folder).
 
-Without a token every prompt is withheld with a message saying why.
+In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with
+`georgecurta/anonym-legal-guard`, then **Add plugin**.
+
+### 3. Enter the token
+
+Right after the install, Claude Code shows the mod's options. Paste the token into
+**anonym.legal API-Schlüssel** (`api_key`) and save. Leave the other options as they are; `language` is
+`de` by default, set it to `de,en` if your project mixes German and English.
+
+To enter or change the token later:
+
+- in a Claude Code session: type `/plugin`, choose **anonym-legal-guard**, then **Configure**;
+- or from a shell: `claude plugin configure anonym-legal-guard` lists the options and shows which are not
+  set yet.
+
+The token is marked as secret: Claude Code keeps it in its own credential storage, not in your project
+files, so it does not end up in a git repository.
+
+### 4. Check that it works
+
+Start a new Claude Code session. The status line shows `anonym.legal: PII-Schutz aktiv`; without a token
+it shows `anonym.legal: kein API-Schlüssel, Prompts werden blockiert`. Type `/pii` at any time: it shows
+`anonym.legal PII-Schutz: aktiv (https://anonym.legal, Sprache de)`, what the mod has replaced in this
+session and whether anonym.legal answered.
+
+If the token is missing, wrong or the plan has no access, every prompt is withheld with a message saying
+why (messages are in German for now):
+
+| Message | Meaning | What to do |
+|---|---|---|
+| `kein API-Schlüssel eingetragen` | no token entered | step 3 |
+| `Token ungültig (HTTP 401)` | token wrong or regenerated | copy the current token again (step 1, 3) |
+| `Tarif ohne Zugang zum Mod (HTTP 403 …)` | Free plan | choose Basic, Pro or Business |
+| `Guthaben leer (HTTP 402)` | no tokens left this month | buy tokens or wait for the next month |
 
 ## What it does
 
