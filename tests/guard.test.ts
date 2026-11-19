@@ -23,10 +23,15 @@ import {
   rowIsScanned,
   shellVerdict,
   sweepKnown,
+  scrubRequestBody,
+  knownValues,
+  insideAllowed,
+  insideWord,
   tokenFor,
   type Entity,
 } from '../hooks/core'
 import { msg, parseLang } from '../hooks/messages'
+import { PROFILES, profileCommand, settingsReport } from '../hooks/settings'
 
 // Die Tests prüfen den deutschen Wortlaut und die feste Sprache de; Englisch und Kontomodus haben eigene Tests unten.
 const OPTIONS = { options: { api_key: 'test-key', api_url: 'https://pii.example', allow_other_host: true, ui_language: 'de', language: 'de' } }
@@ -1057,7 +1062,7 @@ test('jede Anfrage trägt die Kopfzeile X-Client-Version', DE_EN, async ($, on) 
   const sent = langAnalyzer(on, false)
   await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'h1', content: `${NAME} <${MAIL}>` }]) as never)
   expect(sent.length).toBe(2)
-  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.7.0')).toBe(true)
+  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.7.2')).toBe(true)
 })
 
 // ── Wartezeiten ─────────────────────────────────────────────────
@@ -1548,4 +1553,96 @@ test('Kern: isAccountOption, parseLanguages, parseLang, msg', () => {
   expect(msg('xx' as never, 'notALock')).toBe('Protection against accidents, not a lock against intent.')
   expect(parseLang('DE')).toBe('de')
   expect(parseLang(undefined)).toBe('en')
+})
+
+// ── 0.7.2: Funde vom macOS-Test 2026-11-18 ─────────────────────────────
+
+test('0.7.2 Klarwert im Verlauf: der Körper wird ersetzt statt gestoppt, danach kein Leck', () => {
+  const v = tokenFor(vault0(), 'EMAIL_ADDRESS', MAIL).vault
+  const tok = knownValues(v)[0].token
+  const body = JSON.stringify({ messages: [{ role: 'user', content: `alt: ${MAIL}` }, { role: 'user', content: 'weiter' }] })
+  expect(stops(requestLeak(MODEL, body, v))).toBe(true)
+  const r = scrubRequestBody(body, v)!
+  expect(typeof r.body).toBe('string')
+  expect(String(r.body).includes(MAIL)).toBe(false)
+  expect(String(r.body).includes(tok)).toBe(true)
+  expect(JSON.parse(String(r.body)).messages[1].content).toBe('weiter')
+  expect(stops(requestLeak(MODEL, r.body, r.vault))).toBe(false)
+})
+
+test('0.7.2 Ersetzen behält die base64-Form und trifft die JSON-maskierte Schreibweise', () => {
+  const v = tokenFor(vault0(), 'PERSON', 'Zoë Kühn').vault
+  const masked = JSON.stringify({ t: 'Zoë Kühn' }).replace(/[-￿]/g, (c) => BS + 'u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
+  const r1 = scrubRequestBody(masked, v)!
+  expect(stops(requestLeak(MODEL, r1.body, r1.vault))).toBe(false)
+  const b64 = { base64: toBase64(utf8(JSON.stringify({ t: 'an Zoë Kühn' }))) }
+  const r2 = scrubRequestBody(b64, v)!
+  expect(typeof (r2.body as { base64: string }).base64).toBe('string')
+  expect(stops(requestLeak(MODEL, r2.body, r2.vault))).toBe(false)
+})
+
+test('0.7.2 Gegenprobe: nur kodiert im Körper -> nichts zu ersetzen, die Anfrage bleibt gestoppt', () => {
+  const v = tokenFor(vault0(), 'EMAIL_ADDRESS', MAIL).vault
+  const body = JSON.stringify({ text: `siehe ${toBase64(utf8(`An: ${MAIL}`))}` })
+  expect(scrubRequestBody(body, v)).toBe(undefined)
+  expect(stops(requestLeak(MODEL, body, v))).toBe(true)
+})
+
+test('0.7.2 allow_values: „Code“ aus „Claude Code“ wird nicht ersetzt, ein echter Name daneben schon', () => {
+  const allow = new Set(['claude code'])
+  const text = 'Claude Code hilft Anna Berg.'
+  expect(insideAllowed(text, { entity_type: 'PERSON', start: 7, end: 11, text: 'Code', score: 0.9 }, allow)).toBe(true)
+  expect(insideAllowed(text, { entity_type: 'PERSON', start: 19, end: 28, text: 'Anna Berg', score: 0.9 }, allow)).toBe(false)
+  // ohne Offsets: jedes Vorkommen muss im erlaubten Wert stehen
+  expect(insideAllowed('Claude Code und Code Smith', { entity_type: 'PERSON', text: 'Code', score: 0.9 }, allow)).toBe(false)
+})
+
+test('0.7.2 Treffer mitten in einem Wort (Git-SHA) zählt nicht, Genitiv-s schon', () => {
+  const sha = 'commit 3f9a1c2b7e04d5a6 ok'
+  expect(insideWord(sha, { entity_type: 'MEDICAL_LICENSE', start: 10, end: 16, text: '1c2b7e', score: 0.9 })).toBe(true)
+  expect(insideWord('Anna Bergs Akte', { entity_type: 'PERSON', start: 0, end: 9, text: 'Anna Berg', score: 0.9 })).toBe(false)
+})
+
+test('0.7.2 Loopback-Adressen sind keine personenbezogenen Daten, andere IPs schon', () => {
+  const none = new Set<string>()
+  const hit = (entity_type: string, text: string): Entity => ({ entity_type, text, score: 0.9, start: 0, end: text.length })
+  for (const ip of ['127.0.0.1', '127.1.2.3', '0.0.0.0', '::1']) expect(plausible(hit('IP_ADDRESS', ip), 0.5, none)).toBe(false)
+  expect(plausible(hit('IP_ADDRESS', '203.0.113.7'), 0.5, none)).toBe(true)
+})
+
+test('0.7.2 /pii-settings: Standard bei leerem Feld, geänderte Werte markiert, Token nie im Klartext', { options: { ...OPTIONS.options, leak_guard: 'log' } }, async ($) => {
+  const text = String((await $.command.run({ command: 'pii-settings' } as never)).text)
+  expect(text.includes('test-key')).toBe(false)
+  expect(text.includes('••• set')).toBe(true)
+  expect(/leak_guard\s+log\s+← geändert/.test(text)).toBe(true)
+  expect(/shell_guard\s+block \(Standard\)/.test(text)).toBe(true)
+  expect(text.includes('https://anonym.legal/entities')).toBe(true)
+})
+
+test('0.7.2 /pii-settings: Profile sind gültiges JSON und setzen nur bekannte Optionen', () => {
+  const known = new Set(['leak_guard', 'shell_guard', 'file_values', 'media', 'encoded_runs', 'ignore_types', 'min_score'])
+  for (const p of PROFILES) {
+    const cmd = profileCommand(p.values)
+    expect(cmd.startsWith("printf '%s" + BS + "n' '")).toBe(true)
+    const json = cmd.slice(cmd.indexOf("' '") + 3, cmd.lastIndexOf("'"))
+    expect(JSON.parse(json)).toEqual(p.values)
+    for (const k of Object.keys(p.values)) expect(known.has(k)).toBe(true)
+  }
+  expect(PROFILES.find((p) => p.name === 'strict')!.values.file_values).toBe('deny')
+  expect(settingsReport({}, 'en', '0.7.2').includes('api_key            NOT SET')).toBe(true)
+})
+
+test('0.7.2 Codex: allow_values verrutscht nicht bei Zeichen, die klein geschrieben länger werden (İ)', () => {
+  const allow = new Set(['claude'])
+  const text = 'İİİİİİİ Claude Anna.'
+  const anna = Array.from(text).indexOf('A')
+  expect(insideAllowed(text, { entity_type: 'PERSON', start: anna, end: anna + 4, text: 'Anna', score: 0.9 }, allow)).toBe(false)
+  const cl = Array.from(text).indexOf('C')
+  expect(insideAllowed(text, { entity_type: 'PERSON', start: cl, end: cl + 6, text: 'Claude', score: 0.9 }, allow)).toBe(true)
+})
+
+test('0.7.2 Codex: ein Name zwischen Buchstaben bleibt ein Treffer, nur Hex/Ziffern-Stücke fallen weg', () => {
+  expect(insideWord('xAnna Bergy', { entity_type: 'PERSON', start: 1, end: 10, text: 'Anna Berg', score: 0.9 })).toBe(false)
+  expect(insideWord('abcAnnaxyz', { entity_type: 'PERSON', start: 3, end: 7, text: 'Anna', score: 0.9 })).toBe(false)
+  expect(insideWord('commit 3f9a1c2b7e04d5a6 ok', { entity_type: 'MEDICAL_LICENSE', start: 10, end: 16, text: '1c2b7e', score: 0.9 })).toBe(true)
 })

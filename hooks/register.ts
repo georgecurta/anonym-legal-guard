@@ -36,6 +36,9 @@ import {
   isAccountOption,
   isTokenCountRequest,
   requestLeak,
+  scrubRequestBody,
+  insideAllowed,
+  insideWord,
   leftoverTokens,
   newTag,
   parseLanguages,
@@ -51,11 +54,12 @@ import {
   type Entity,
 } from './core'
 import { msg, parseLang, type Key, type Lang } from './messages'
+import { settingsReport } from './settings'
 
 type Block = { type: string; [field: string]: unknown }
 
 /** Fassung des Mods; muss zu `.claude-plugin/plugin.json` passen (der Mod liest keine Dateien). */
-export const VERSION = '0.7.0'
+export const VERSION = '0.7.2'
 const CLIENT = `ClaudeCodeMod/${VERSION}`
 
 const vaultAtom = atom({ plugin: 'anonym-legal-guard', key: 'vault' } as const, emptyVault(), { shape: 'vault-3' })
@@ -429,7 +433,7 @@ async function scrub($: EngineInterface, text: string, dry = false): Promise<str
   const swept = sweepKnown(plain, before).text
   // Ein Namens-Treffer, der selbst ein kodierter Abschnitt ist, ist ein Zufallstreffer; den
   // Abschnitt hat scrubEncoded schon geprüft (live gemessen 2026-11-16).
-  const entities = (await analyze($, swept)).filter((x) => keep(x) && (cfg.encodedRuns === 'off' || !encodedNameHit(x)))
+  const entities = (await analyze($, swept)).filter((x) => keep(x) && !insideAllowed(swept, x, cfg.allowValues) && !insideWord(swept, x) && (cfg.encodedRuns === 'off' || !encodedNameHit(x)))
   if (dry) return swept
   let result = swept
   await update($, vaultAtom, (v) => {
@@ -537,6 +541,7 @@ const TOKEN_COUNT_WITHHELD = () => `${t('tokenCountWithheld')} ${t('notALock')}`
 const LEAK_STOPPED = () => `${t('leakStopped')} ${t('notALock')}`
 
 export const register: Register = (on, options) => {
+  const rawOptions = options as Record<string, unknown>
   const languageOption = String(options.language ?? 'account')
   cfg = {
     apiUrl: String(options.api_url ?? 'https://anonym.legal').replace(/\/+$/, ''),
@@ -581,6 +586,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'pii', description: t('cmdDescription') })
+    await $.command.register({ name: 'pii-settings', description: cfg.lang === 'de' ? 'anonym.legal: alle Einstellungen mit Standard und Profilen' : 'anonym.legal: all settings with defaults and profiles' })
     const problem = !apiKey ? t('problemNoKey') : cfg.urlProblem ? t('problemUrl', { problem: cfg.urlProblem }) : undefined
     $.ui.status(problem ? t('statusProblem', { problem }) : t('statusActive'))
     // Vorwärmen ohne zu warten: über einen Zeitgeber, damit die Arbeit den Start überdauert
@@ -588,6 +594,8 @@ export const register: Register = (on, options) => {
     if (!problem) $.clock.after(0, () => void warm($).catch(() => undefined))
     return next(e)
   })
+
+  on('command.run', { command: 'pii-settings' }, async () => ({ text: settingsReport(rawOptions, cfg.lang, VERSION) }))
 
   on('command.run', { command: 'pii' }, async ($) => {
     const v = await read($, vaultAtom)
@@ -766,6 +774,20 @@ export const register: Register = (on, options) => {
       const leak = requestLeak(e.url, e.init?.body, await read($, vaultAtom))
       if (leak && 'unreadable' in leak) return leakGuard === 'block' ? { deny: `${LEAK_STOPPED()} (${t('bodyUnreadable')})` } : next(e)
       if (!leak) return next(e)
+      if (leakGuard === 'block' && leak.strong) {
+        // Erst ersetzen, dann neu prüfen (0.7.2): ein Klarwert im Verlauf darf die Sitzung nicht für immer sperren.
+        const vault = await read($, vaultAtom)
+        const scrubbed = scrubRequestBody(e.init?.body, vault)
+        if (scrubbed) {
+          const rest = requestLeak(e.url, scrubbed.body, scrubbed.vault)
+          if (!rest || (!('unreadable' in rest) && !rest.strong)) {
+            if (scrubbed.vault !== vault) await update($, vaultAtom, (old) => (old === vault ? scrubbed.vault : old))
+            await note($, (s) => ({ ...s, leaks: s.leaks + 1, rewritten: (s.rewritten ?? 0) + 1 }))
+            $.ui.log(t('logLeakRewritten', { token: leak.token, count: scrubbed.count }))
+            return next({ ...e, init: { ...e.init, body: scrubbed.body } } as typeof e)
+          }
+        }
+      }
       const stop = leakGuard === 'block' && leak.strong
       await note($, (s) => ({ ...s, leaks: s.leaks + 1, blocked: s.blocked + (stop ? 1 : 0) }))
       $.ui.log(t(stop ? 'logLeakStop' : 'logLeakNote', { token: leak.token }))

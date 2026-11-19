@@ -1,6 +1,6 @@
 {
   "name": "anonym-legal-guard",
-  "version": "0.7.0",
+  "version": "0.7.2",
   "description": "Preview by anonym.legal: replaces detected personal data with placeholders before text goes to the model. Protection against accidents, not against injected instructions and not against intent. Detection is not complete. Requires an anonym.legal account (Basic, Pro or Business).",
   "author": {
     "name": "anonym.legal"
@@ -10,13 +10,13 @@
     "api_key": {
       "type": "string",
       "title": "API token (anonym.legal)",
-      "description": "anonym.legal → Settings → Developer → API Access Token. Without it every prompt is withheld. Stored as a secret, never in the repository.",
+      "description": "Required. anonym.legal → Settings → Developer → API Access Token. Without it every prompt is withheld. Stored as a secret, never in the repository.",
       "sensitive": true
     },
     "ui_language": {
       "type": "string",
       "title": "Interface language",
-      "description": "Language of the mod's messages, status line and /pii: en (English) or de (Deutsch).",
+      "description": "If left empty: en. Language of the mod's messages, status line and /pii: en (English) or de (Deutsch).",
       "options": [
         "en",
         "de"
@@ -26,31 +26,31 @@
     "language": {
       "type": "string",
       "title": "Detection languages",
-      "description": "account (default): the automatic detection languages saved in your anonym.legal account (Settings → Language). Or codes separated by commas, at most three, e.g. de or de,en. Each extra language checks every text again and costs tokens.",
+      "description": "If left empty: account. account: the automatic detection languages saved in your anonym.legal account (Settings → Language). Or codes separated by commas, at most three, e.g. de or de,en. Each extra language checks every text again and costs tokens.",
       "default": "account"
     },
     "api_url": {
       "type": "string",
       "title": "API address",
-      "description": "Address of anonym.legal. https only. A host other than anonym.legal needs allow_other_host.",
+      "description": "If left empty: https://anonym.legal. Address of anonym.legal. https only. A host other than anonym.legal needs allow_other_host.",
       "default": "https://anonym.legal"
     },
     "allow_other_host": {
       "type": "boolean",
       "title": "Allow other host",
-      "description": "Allows an api_url with a host other than anonym.legal (e.g. a test environment). Default: off; every prompt is then rejected with a message.",
+      "description": "If left empty: off. Allows an api_url with a host other than anonym.legal (e.g. a test environment). While off, such an api_url makes the mod withhold every prompt with a message.",
       "default": false
     },
     "preset": {
       "type": "string",
       "title": "Preset",
-      "description": "Name of a preset, e.g. developer; empty for the default settings.",
+      "description": "If left empty: no preset. Name of an anonym.legal preset, e.g. developer.",
       "default": ""
     },
     "media": {
       "type": "string",
       "title": "Images and documents",
-      "description": "drop: withhold (images cannot be redacted); keep: let them through.",
+      "description": "If left empty: drop. drop: images and documents are withheld (they cannot be redacted); keep: they are sent unchecked.",
       "options": [
         "drop",
         "keep"
@@ -60,7 +60,7 @@
     "leak_guard": {
       "type": "string",
       "title": "Leak check",
-      "description": "Looks for redacted values in plain text and encoded (base64, hex, percent) in requests to the model and in the arguments of outbound tools (WebFetch, WebSearch, Agent, Monitor, MCP, Bash). block: stop clear cases (default); log: report only; off: off.",
+      "description": "If left empty: block. Looks for redacted values in plain text and encoded (base64, hex, percent) in requests to the model and in the arguments of outbound tools (WebFetch, WebSearch, Agent, Monitor, MCP, Bash). block: a known value in clear text is replaced by its placeholder, what cannot be replaced is stopped; log: report only; off: off.",
       "options": [
         "log",
         "block",
@@ -71,7 +71,7 @@
     "encoded_runs": {
       "type": "string",
       "title": "Encoded sections",
-      "description": "base64 from 16 and hex from 32 characters in everything that goes to the model. scan: check decodable sections and replace on a match (default); strict: also replace undecodable ones from 512 characters, except in lines with integrity or sha512-; off: off.",
+      "description": "If left empty: scan. base64 from 16 and hex from 32 characters in everything that goes to the model. scan: check decodable sections and replace on a match; strict: also replace undecodable ones from 512 characters, except in lines with integrity or sha512-; off: off.",
       "options": [
         "scan",
         "strict",
@@ -82,7 +82,7 @@
     "shell_guard": {
       "type": "string",
       "title": "Command check",
-      "description": "Rejects common conversion and upload commands (base64 with a file, xxd, od, curl -d @file …) and asks for scp, sftp, rsync and tar c … |. block: as described (default); ask: ask for all of them; off: off. Protection against accidents, not a lock against intent.",
+      "description": "If left empty: block. Rejects common conversion and upload commands (base64 with a file, xxd, od, curl -d @file …) and asks for scp, sftp, rsync and tar c … |. block: as described; ask: ask for all of them; off: off. Protection against accidents, not a lock against intent.",
       "options": [
         "block",
         "ask",
@@ -93,7 +93,7 @@
     "file_values": {
       "type": "string",
       "title": "Values in files",
-      "description": "real: when writing files the mod inserts the real values (default); deny: strict mode, Write, Edit and NotebookEdit with placeholders do not run. Read, Glob and Grep get real values in both cases.",
+      "description": "If left empty: real. real: when writing files the mod inserts the real values; deny: strict mode, Write, Edit and NotebookEdit with placeholders do not run. Read, Glob and Grep get real values in both cases.",
       "options": [
         "real",
         "deny"
@@ -103,37 +103,37 @@
     "detokenize_bash": {
       "type": "boolean",
       "title": "Real values in Bash commands too",
-      "description": "Caution: a command can send data to the network (curl). Default: off.",
+      "description": "If left empty: off. On: Bash commands get the real values instead of placeholders. Caution: a command can send data to the network (curl).",
       "default": false
     },
     "min_score": {
       "type": "number",
       "title": "Minimum detection score",
-      "description": "Matches below this score are skipped (0 to 1).",
+      "description": "If left empty: 0.5. Matches below this score are skipped (0 to 1).",
       "default": 0.5
     },
     "ignore_types": {
       "type": "string",
       "title": "Ignored types",
-      "description": "Comma-separated types that are not replaced. Default after the 2026-11-16 evaluation: URL, DATE_TIME, NRP, ORGANIZATION (mostly false matches in code).",
+      "description": "If left empty: URL,DATE_TIME,NRP,ORGANIZATION (in code these are mostly false matches; evaluation of 2026-11-16). Comma-separated entity types that are not replaced.",
       "default": "URL,DATE_TIME,NRP,ORGANIZATION"
     },
     "scan_hook_context": {
       "type": "boolean",
       "title": "Check hook context",
-      "description": "Also redact the output of settings hooks (default: on; it can carry customer data).",
+      "description": "If left empty: on. Also checks and redacts the output of hooks from your settings (it can carry customer data).",
       "default": true
     },
     "skip_attachments": {
       "type": "string",
       "title": "Attachment kinds not checked",
-      "description": "Comma-separated kinds of attachments that Claude Code writes itself and that are not checked (tool, skill and agent lists). Unknown kinds are checked.",
+      "description": "If left empty: the tool, skill and agent lists Claude Code writes itself. Comma-separated attachment kinds that are not checked; unknown kinds are always checked.",
       "default": "deferred_tools_delta,skill_listing,agent_listing_delta,mcp_instructions_delta,model,date,remote_session_change"
     },
     "allow_values": {
       "type": "string",
       "title": "Allowed values",
-      "description": "Comma-separated values that are never replaced (default: names of Claude and Anthropic that occur in every session).",
+      "description": "If left empty: names of Claude and Anthropic (Claude, Claude Code, Opus, Sonnet, Haiku, Fable, Anthropic …), which occur in every session. Comma-separated values that are never replaced.",
       "default": "Claude,Claude Code,Claude Opus,Claude Sonnet,Claude Haiku,Claude Fable,Anthropic,Opus,Sonnet,Haiku,Fable"
     }
   },

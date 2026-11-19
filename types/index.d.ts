@@ -26,6 +26,8 @@ export type GuardStats = {
   leaks: number
   /** davon gestoppt */
   blocked: number
+  /** Anfragen ans Modell, in denen ein bekannter Klarwert durch seinen Platzhalter ersetzt wurde (0.7.2). */
+  rewritten?: number
   /** ersetzte kodierte Abschnitte (base64, Hex) */
   encoded?: number
   /** Ergebnis des Vorwärmens je Sprache: `bereit`/`ready` oder der Fehler; im Kontomodus unter `account`, z. B. `ready: de,en` */

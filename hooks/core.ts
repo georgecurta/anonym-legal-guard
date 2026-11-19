@@ -1014,6 +1014,39 @@ export function bodyText(body: unknown): string | undefined {
 }
 
 /**
+ * Ersetzt bekannte Werte im Körper einer Anfrage ans Modell durch ihre Platzhalter: im Klartext und
+ * JSON-maskiert, in jeder Schreibweise, die `sweepKnown` kennt. Der Körper behält seine Form (Text oder
+ * `{ base64 }`). Gibt `undefined` zurück, wenn der Körper nicht lesbar ist oder nichts ersetzt wurde.
+ *
+ * Warum (Fund 2026-11-18, Live auf macOS): stand ein bekannter Wert einmal im Klartext im Verlauf (etwa
+ * 127.0.0.1 aus einer Werkzeugausgabe), stoppte die Lecksuche JEDE weitere Anfrage, denn jede Anfrage
+ * trägt den ganzen Verlauf. Die Sitzung war nicht mehr benutzbar. Der Mod kennt die Zuordnung; er setzt
+ * den Platzhalter ein, statt zu stoppen. Was danach noch gefunden wird (kodiert, Teilstücke), stoppt.
+ */
+export function scrubRequestBody(body: unknown, vault: Vault): { body: unknown; vault: Vault; count: number } | undefined {
+  const text = bodyText(body)
+  if (text === undefined) return undefined
+  const swept = sweepKnown(text, vault)
+  let out = swept.text
+  let v = swept.vault
+  let count = swept.count
+  // JSON-maskierte Form („Zoë“ als „Zoë“, Anführungszeichen als \"): exakt, ohne Schreibweisen.
+  for (const { value, token } of knownValues(v)) {
+    const masked = JSON.stringify(value).slice(1, -1)
+    const asciiMasked = masked.replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    for (const m of new Set([masked, asciiMasked])) {
+      if (m === value || !out.includes(m)) continue
+      const parts = out.split(m)
+      count += parts.length - 1
+      out = parts.join(JSON.stringify(token).slice(1, -1))
+    }
+  }
+  if (count === 0) return undefined
+  const next = typeof body === 'string' ? out : { ...(body as object), base64: toBase64(new TextEncoder().encode(out)) }
+  return { body: next, vault: v, count }
+}
+
+/**
  * Die Entscheidung des `http.fetch`-Hooks über eine Anfrage der Engine: URL und Körper werden
  * zusammen geprüft, eine Anfrage ohne Körper über die URL allein. Ein Körper, der
  * nicht lesbar ist, ergibt `unreadable`.
@@ -1068,6 +1101,7 @@ export function plausible(e: Entity, minScore: number, ignore: ReadonlySet<strin
   if (e.score < minScore) return false
   const t = (e.text ?? '').trim()
   if (allow.has(t.toLowerCase())) return false
+  if (type === 'IP_ADDRESS' && NON_PERSONAL_IP.test(t)) return false
   // eine Versionsangabe (`^1.1.4`, `16.1.1`, `~2.0.0-beta.3`) ist weder Name noch Ort noch Kennzeichen.
   if (VERSION_LIKE.test(t) && !STRONG_VERSION_TYPES.has(type)) return false
   if (['PERSON', 'LOCATION', 'ORGANIZATION', 'NRP'].includes(type)) {
@@ -1081,6 +1115,55 @@ export function plausible(e: Entity, minScore: number, ignore: ReadonlySet<strin
   if (type === 'DE_LICENSE_PLATE' && /^[-rwxdsStT]+$/.test(t.replace(/\s/g, ''))) return false
   return true
 }
+
+/**
+ * Ob ein Treffer in einem erlaubten Wert steht, der im Text an dieser Stelle vorkommt (0.7.2). Fund
+ * 2026-11-18 auf macOS: `allow_values` enthielt „Claude Code“, die Erkennung meldete aber nur „Code“ als
+ * PERSON; der Vergleich des Treffers mit der Liste griff nicht, und aus „Claude Code“ wurde überall
+ * „Claude ‹PERSON_6›“. Offsets zählen Codepunkte; ohne Offsets wird der Treffer im Text gesucht.
+ */
+export function insideAllowed(text: string, e: Entity, allow: ReadonlySet<string>): boolean {
+  if (allow.size === 0) return false
+  const cps = Array.from(text)
+  let spans: Array<[number, number]> = []
+  if (typeof e.start === 'number' && typeof e.end === 'number') {
+    const s = cps.slice(0, e.start).join('').length
+    spans = [[s, s + cps.slice(e.start, e.end).join('').length]]
+  } else if (e.text) {
+    for (let i = text.indexOf(e.text); i !== -1; i = text.indexOf(e.text, i + 1)) spans.push([i, i + e.text.length])
+  }
+  if (spans.length === 0) return false
+  // Gesucht wird im Originaltext mit einem Ausdruck ohne Rücksicht auf Groß/klein: Positionen aus
+  // einem klein geschriebenen Text verrutschen, wo ein Zeichen dabei länger wird (İ → i̇; Codex 2026-11-18).
+  const hits: Array<[number, number]> = []
+  for (const a of allow) {
+    if (!a) continue
+    const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'giu')
+    for (const m of text.matchAll(re)) hits.push([m.index ?? 0, (m.index ?? 0) + m[0].length])
+  }
+  return spans.every(([s, end]) => hits.some(([hs, he]) => hs <= s && end <= he))
+}
+
+/**
+ * Ob ein Treffer mitten in einem längeren Wort steht, links UND rechts Buchstaben oder Ziffern (0.7.2). Fund 2026-11-18 auf macOS: mitten in
+ * einem Git-SHA meldete die Erkennung MEDICAL_LICENSE. Ein Wert, der direkt an Buchstaben oder Ziffern
+ * grenzt, ist kein eigener Wert; Ersetzen zerstört nur das Wort.
+ */
+export function insideWord(text: string, e: Entity): boolean {
+  if (typeof e.start !== 'number' || typeof e.end !== 'number') return false
+  const cps = Array.from(text)
+  const before = e.start > 0 ? cps[e.start - 1] : ''
+  const after = cps[e.end] ?? ''
+  const value = cps.slice(e.start, e.end).join('')
+  // Nur Stücke aus Hex- oder Ziffernfolgen (Hashes, Kennungen). Ein Name zwischen Buchstaben bleibt ein
+  // Treffer: „xAnna Bergy“ darf nicht durchgehen (Codex 2026-11-18); „Anna Bergs“ ohnehin nicht.
+  const hex = /^[0-9a-fA-F]$/
+  return hex.test(before) && hex.test(after) && /^[0-9a-fA-F]+$/.test(value)
+}
+
+/** Adressen, die auf jedem Rechner gleich sind und niemanden bezeichnen (0.7.2, Fund 2026-11-18). */
+const NON_PERSONAL_IP = /^(127(\.\d{1,3}){3}|0\.0\.0\.0|::1?|localhost)$/i
 
 /** Ein Namens-Treffer der Erkennung, der selbst ein kodierter Abschnitt ist (live gemessen 2026-11-16). */
 export function encodedNameHit(e: Entity): boolean {

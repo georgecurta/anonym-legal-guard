@@ -167,16 +167,75 @@ keep it.
 
 ## Options
 
-| Option | Default | Meaning |
+Claude Code lists every option as "not set" until you change it. **An option you leave empty uses the default
+below**; the mod applies it itself. Only `api_key` must be filled in. Options with a fixed list of values refuse
+anything else when you save.
+
+**Everyday options**
+
+| Option | Default (if left empty) | Meaning |
 |---|---|---|
-| `api_key` | – | your anonym.legal API token (stored as a secret) |
+| `api_key` | – (required) | your anonym.legal API token, stored as a secret |
 | `ui_language` | `en` | language of messages, status line and `/pii`: `en` or `de` |
-| `language` | `account` | detection languages: `account` (from your anonym.legal account) or codes such as `de`, `de,en` |
-| `leak_guard` | `block` | `block` stops clear leaks, `log` only reports, `off` |
-| `shell_guard` | `block` | `block` refuses encoders and uploads, `ask` asks for everything, `off` |
-| `encoded_runs` | `scan` | `scan` checks decodable sections, `strict` also withholds long binary runs, `off` |
-| `file_values` | `real` | `real` writes real values to files, `deny` refuses writes with placeholders |
-| `media` | `drop` | images and documents are withheld; `keep` sends them unchecked |
+| `language` | `account` | detection languages: `account` (the automatic languages in your anonym.legal account) or up to three codes such as `de`, `de,en`; each extra language checks every text again and costs tokens |
+| `file_values` | `real` | `real`: files the model writes get the real values; `deny` (strict mode): writes with placeholders are refused |
+| `media` | `drop` | `drop`: images and documents are withheld (they cannot be redacted); `keep`: sent unchecked |
+
+**Protection switches** (leave them on their defaults unless you have a reason)
+
+| Option | Default (if left empty) | Meaning |
+|---|---|---|
+| `leak_guard` | `block` | checks every request to the model and the arguments of outbound tools for known values, also encoded; `block` replaces a known value in clear text by its placeholder and stops what it cannot replace, `log` only reports, `off` |
+| `shell_guard` | `block` | `block` refuses encoders and uploads and asks for `scp`, `sftp`, `rsync`, `tar c … \|`; `ask` asks for all of them; `off` |
+| `encoded_runs` | `scan` | base64 (from 16 characters) and hex (from 32): `scan` checks decodable sections, `strict` also withholds long undecodable ones, `off` |
+| `detokenize_bash` | off | on: shell commands get real values instead of placeholders; a command can then send them to the network |
+| `scan_hook_context` | on | also checks the output of hooks from your settings |
+
+**Fine tuning**
+
+| Option | Default (if left empty) | Meaning |
+|---|---|---|
+| `min_score` | `0.5` | matches below this score (0 to 1) are not replaced |
+| `ignore_types` | `URL,DATE_TIME,NRP,ORGANIZATION` | entity types that are not replaced (in code these are mostly false matches) |
+| `allow_values` | names of Claude and Anthropic | comma-separated values that are never replaced |
+| `skip_attachments` | Claude Code's own tool, skill and agent lists | attachment kinds that are not checked; unknown kinds are always checked |
+| `preset` | none | name of an anonym.legal preset, e.g. `developer` |
+| `api_url` | `https://anonym.legal` | address of the service; https only |
+| `allow_other_host` | off | allows an `api_url` with another host (e.g. a test environment); while off, such an address withholds every prompt |
+
+**See and change them quickly.** In a Claude Code session, `/pii-settings` lists every option with its current
+value, its default and a one-line explanation, and prints three ready-made profiles as commands:
+
+| Profile | For | Sets |
+|---|---|---|
+| `standard` | most users | the defaults |
+| `strict` | law firms, health data (protection against accidents, see Limits) | `file_values: deny` (no real values written to disk), `encoded_runs: strict` |
+| `development` | source code with few personal data | adds `IP_ADDRESS` to `ignore_types`, `min_score: 0.7` |
+
+A profile is one line for bash or zsh (macOS, Linux, WSL); `/pii-settings` prints each one ready to copy, for example:
+
+```
+printf '%s\n' '{"file_values":"deny","encoded_runs":"strict"}' | claude plugin configure anonym-legal-guard@anonym-legal --values-stdin
+```
+
+Restart Claude Code afterwards.
+
+### Ignoring types and values
+
+- **`ignore_types`** takes entity types, comma-separated, exactly as the detection names them. Common ones:
+  `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `LOCATION`, `ORGANIZATION`,
+  `DATE_TIME`, `URL`, `NRP` (nationality, religious or political group), `MEDICAL_LICENSE`. The full list with
+  all country-specific types is at [anonym.legal/entities](https://anonym.legal/entities). A type in this list
+  is never replaced, so it also reaches the model. Setting the option replaces the default list; keep
+  `URL,DATE_TIME,NRP,ORGANIZATION` in it unless you want those replaced.
+- **`allow_values`** takes words or phrases, comma-separated. Matching ignores upper and lower case and only
+  counts whole words. A hit that lies inside an allowed phrase is also kept: with `Claude Code` allowed, `Code`
+  in "Claude Code" is never replaced. Setting the option replaces the default list (names of Claude and
+  Anthropic).
+- **`skip_attachments`** is for experts. It names kinds of attachments that Claude Code writes itself (tool,
+  skill and agent lists). Kinds not in the list are always checked. Leave it empty.
+- **Not personal data, never replaced:** loopback addresses (`127.0.0.1`, `::1`, `0.0.0.0`), and matches in the
+  middle of a hex or digit string (for example inside a Git commit hash).
 
 ## Your data
 
