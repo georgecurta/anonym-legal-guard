@@ -1,5 +1,5 @@
 // /pii-settings (0.7.2): alle Optionen mit aktuellem Wert, Standard und Erklärung, dazu fertige Profile.
-// Grund (Eigentümer 2026-11-18): Claude Code zeigt im Dialog jede Option als „not set“ und nennt den
+// Grund (0.7.2): Claude Code zeigt im Dialog jede Option als „not set“ und nennt den
 // Standard nicht; ein Mod kann diesen Dialog nicht ersetzen. Reine Funktion, ohne Netz testbar.
 
 import type { Lang } from './messages'
@@ -37,7 +37,7 @@ const PLUGIN_ID = 'anonym-legal-guard@anonym-legal'
 
 /** Ein Ein-Zeilen-Befehl, der die Werte setzt (Werte als JSON über stdin, siehe `claude plugin configure --help`). */
 export function profileCommand(values: Record<string, string>): string {
-  // printf statt echo: zsh (macOS) deutet Backslashes in echo, dann wäre das JSON kaputt (Codex 2026-11-18).
+  // printf statt echo: zsh (macOS) deutet Backslashes in echo, dann wäre das JSON kaputt.
   const quoted = JSON.stringify(values).replace(/'/g, "'\\''")
   return `printf '%s\\n' '${quoted}' | claude plugin configure ${PLUGIN_ID} --values-stdin`
 }

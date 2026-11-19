@@ -42,7 +42,7 @@ export function tokenFor(vault: Vault, type: string, value: string): { vault: Va
   // Zeichen bekommt denselben Platzhalter, solange ihn noch kein anderer Name hat. Ersetzt wird
   // nur an Wortgrenzen, „Annahme“ bleibt also „Annahme“.
   // Nicht für Teile unter 4 Zeichen, erlaubte Werte („Claude“) und Befehlswörter: Ein solcher Teil
-  // steht in jeder Sitzung irgendwo, und die Lecksuche fände ihn in jeder Anfrage (Prüfung 2026-11-16).
+  // steht in jeder Sitzung irgendwo, und die Lecksuche fände ihn in jeder Anfrage.
   const aliases = { ...(vault.aliases ?? {}) }
   if (type === 'PERSON') {
     for (const part of value.split(/\s+/)) {
@@ -992,10 +992,10 @@ export function apiUrlProblem(url: string, allowOtherHost: boolean, lang: Lang =
   try {
     u = new URL(url)
   } catch {
-    return msg(lang, 'urlInvalid', { url })
+    return msg(lang, 'urlInvalid')
   }
-  if (u.protocol !== 'https:') return msg(lang, 'urlHttps', { protocol: u.protocol })
-  if (u.hostname !== 'anonym.legal' && !allowOtherHost) return msg(lang, 'urlHost', { host: u.hostname })
+  if (u.protocol !== 'https:') return msg(lang, 'urlHttps')
+  if (u.hostname !== 'anonym.legal' && !allowOtherHost) return msg(lang, 'urlHost')
   return undefined
 }
 
@@ -1134,7 +1134,7 @@ export function insideAllowed(text: string, e: Entity, allow: ReadonlySet<string
   }
   if (spans.length === 0) return false
   // Gesucht wird im Originaltext mit einem Ausdruck ohne Rücksicht auf Groß/klein: Positionen aus
-  // einem klein geschriebenen Text verrutschen, wo ein Zeichen dabei länger wird (İ → i̇; Codex 2026-11-18).
+  // einem klein geschriebenen Text verrutschen, wo ein Zeichen dabei länger wird (İ → i̇).
   const hits: Array<[number, number]> = []
   for (const a of allow) {
     if (!a) continue
@@ -1157,7 +1157,7 @@ export function insideWord(text: string, e: Entity): boolean {
   const after = cps[e.end] ?? ''
   const value = cps.slice(e.start, e.end).join('')
   // Nur Stücke aus Hex- oder Ziffernfolgen (Hashes, Kennungen). Ein Name zwischen Buchstaben bleibt ein
-  // Treffer: „xAnna Bergy“ darf nicht durchgehen (Codex 2026-11-18); „Anna Bergs“ ohnehin nicht.
+  // Treffer: „xAnna Bergy“ darf nicht durchgehen; „Anna Bergs“ ohnehin nicht.
   const hex = /^[0-9a-fA-F]$/
   return hex.test(before) && hex.test(after) && /^[0-9a-fA-F]+$/.test(value)
 }
@@ -1190,3 +1190,135 @@ export function isTokenCountRequest(url: string): boolean {
   return /\/v1\/messages\/count_tokens\/?$/.test(path)
 }
 
+
+// ── 0.8: Zustand ───────────────────────────────────────────────────────────
+
+/**
+ * Die letzte Antwort der Erkennung in dieser Ladung (0.8). `status` ist der HTTP-Code, `net` (keine
+ * Verbindung) oder `timeout`; `gen` die Ladung, in der die Anfrage begann.
+ */
+export type LastCheck = {
+  ok: boolean
+  status: number | 'net' | 'timeout'
+  at: number
+  gen: number
+  /** Die Antwort kam, aber die verlangte Sprache wurde nicht geprüft. */
+  language?: boolean
+}
+
+export type GuardState = 'unset' | 'checking' | 'protected' | 'failing'
+export type GuardReason = 'no_key' | 'bad_url' | 'unauthorized' | 'payment' | 'forbidden' | 'network' | 'server' | 'language'
+export type DerivedStatus = { state: GuardState; reason?: GuardReason; httpStatus?: number }
+
+/**
+ * Die eine Zustandsquelle für Statuszeile, Sperrmeldung und /pii (0.8): `protected` nur nach einer
+ * erfolgreichen Prüfung durch den Server in DIESER Ladung. Eine Prüfung einer früheren Ladung zählt
+ * nicht; ein späterer Erfolg hebt `failing` auf, ein späterer Fehler `protected`.
+ */
+export function deriveStatus(input: { hasKey: boolean; urlProblem: boolean; lastCheck?: LastCheck; gen: number }): DerivedStatus {
+  if (!input.hasKey) return { state: 'unset', reason: 'no_key' }
+  if (input.urlProblem) return { state: 'failing', reason: 'bad_url' }
+  const c = input.lastCheck
+  if (!c || c.gen !== input.gen) return { state: 'checking' }
+  const http = typeof c.status === 'number' ? { httpStatus: c.status } : {}
+  if (c.ok) return { state: 'protected', ...http }
+  return { state: 'failing', reason: c.language ? 'language' : reasonOf(c.status), ...http }
+}
+
+/** Hinweise, ob eine Oberfläche auf dieser Maschine zeichnet. */
+export type SurfaceSignals = {
+  /** Für `vscode`: true nur aus einer verlässlichen Quelle, dass sie lokal ist; Claude Code 2.1.326 liefert keine. */
+  local?: boolean
+  /** `$.session.surfaces()` zum Zeitpunkt der Anzeige; fehlt: nicht lesbar. */
+  surfaces?: readonly string[]
+  /** Wie viele Clients in dieser Sitzung angemeldet sind (`session.attach`/`detach`); fehlt: nicht lesbar. */
+  clients?: number
+}
+
+/**
+ * Darf die Anzeige auf dieser Oberfläche die echten Werte zeigen?
+ * - `terminal` (lokales TTY): ja.
+ * - `desktop`: nur, solange keine weitere Oberfläche angehängt ist: `surfaces` ist genau [`desktop`] und höchstens
+ *   ein Client hat sich angemeldet. Gemessen lokal am 2026-11-19 (Desktop-App, Sitzung „This computer“, gebündeltes
+ *   Claude Code 2.1.325, `$.session.surfaces()` = `desktop`).  Remote Control wird nicht gemessen
+ *   und meldet sich womöglich ebenfalls als `desktop`: darum zeigen bei mehr als einer Oberfläche oder mehr als einem
+ *   Client alle außer `terminal` Platzhalter. `surfaces()` oder Client-Zähler nicht lesbar: Platzhalter.
+ * - `vscode` nur mit einem Lokal-Signal (ungemessen); `mobile` und jeder unbekannte Name nie.
+ * Die Oberfläche meldet der Client selbst; die Regel schützt gegen Versehen, nicht gegen Absicht.
+ */
+export function mayRevealOnSurface(surface: string, signals: SurfaceSignals = {}): boolean {
+  if (surface === 'terminal') return true
+  if (surface === 'desktop') {
+    const list = signals.surfaces
+    return !!list && list.length === 1 && list[0] === 'desktop' && typeof signals.clients === 'number' && signals.clients <= 1
+  }
+  if (surface === 'vscode') return signals.local === true
+  return false
+}
+
+/**
+ * Setzt in jedem Text eines Werts (Strings in Objekten und Listen, rekursiv) bekannte Klarwerte wieder als
+ * Platzhalter ein (Anzeige auf entfernten Oberflächen). Unverändertes behält seine Identität, damit
+ * nur geänderte Felder neu sind. Neue Platzhalter für Schreibvarianten gelten nur für die Anzeige.
+ */
+export function sweepKnownDeep<T>(value: T, vault: Vault): T {
+  if (typeof value === 'string') return sweepKnown(value, vault).text as T
+  if (Array.isArray(value)) {
+    const out = value.map((v) => sweepKnownDeep(v, vault))
+    return (out.some((v, i) => v !== value[i]) ? out : value) as T
+  }
+  if (value && typeof value === 'object') {
+    let changed = false
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = sweepKnownDeep(v, vault)
+      if (out[k] !== v) changed = true
+    }
+    return (changed ? out : value) as T
+  }
+  return value
+}
+
+/**
+ * Der Ablauf eines Render-Hooks: erst `prepare` (alles Fehleranfällige), dann genau EIN `next`.
+ * Wirft `prepare`, geht lokal das Original weiter (Nachrichten mit Platzhaltern), entfernt nur `withheld()`
+ * ohne `next` (das Original einer Werkzeugzeile trüge Klarwerte). Nach `next` läuft nichts mehr; scheitert
+ * `next` selbst, wird es nicht wiederholt, der Fehler geht an den Aufrufer.
+ */
+export async function renderGuarded<E, R>(args: {
+  original: E
+  reveal: boolean
+  prepare: (e: E) => E | Promise<E>
+  next: (e: E) => R | Promise<R>
+  withheld: () => R
+}): Promise<R> {
+  let out: E
+  try {
+    out = await args.prepare(args.original)
+  } catch {
+    return args.reveal ? args.next(args.original) : args.withheld()
+  }
+  return args.next(out)
+}
+
+/**
+ * Führt eine Anzeige-Arbeit (Statuszeile) aus und fängt jeden Fehler, auch einen späteren (abgelehnte
+ * Promise). `true`: lief durch. So kann ein Fehler der Anzeige den Schutzpfad nie erreichen.
+ */
+export async function safeUi(fn: () => unknown): Promise<boolean> {
+  try {
+    await fn()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Der Grund zu einem gescheiterten Status: 401, 402, 403, Netz und Zeitgrenze; alles andere ist der Server. */
+export function reasonOf(status: number | 'net' | 'timeout' | undefined): GuardReason {
+  if (status === 401) return 'unauthorized'
+  if (status === 402) return 'payment'
+  if (status === 403) return 'forbidden'
+  if (status === 'net' || status === 'timeout') return 'network'
+  return 'server'
+}

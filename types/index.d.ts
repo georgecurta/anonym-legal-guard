@@ -43,6 +43,8 @@ declare module 'claude-code' {
       stats: Shaped<GuardStats>
       /** Dateien, in die der Mod beim Schreiben echte Werte eingesetzt hat (nur Auskunft, endet mit der Sitzung) */
       tainted: Shaped<string[]>
+      /** Angemeldete Clients (clientIds) dieser Sitzung, für die Rückübersetzung auf `desktop`; überlebt ein Neuladen */
+      clients: Shaped<string[]>
     }
   }
 }

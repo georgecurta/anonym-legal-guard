@@ -28,6 +28,8 @@ import {
   insideAllowed,
   insideWord,
   tokenFor,
+  deriveStatus,
+  safeUi,
   type Entity,
 } from '../hooks/core'
 import { msg, parseLang } from '../hooks/messages'
@@ -936,7 +938,8 @@ test('Write mit Platzhalter markiert die Datei; /pii zeigt markierte Dateien, Sc
   expect(text.includes('shell_guard block')).toBe(true)
   expect(text.includes('encoded_runs scan')).toBe(true)
   expect(text.includes('leak_guard block')).toBe(true)
-  expect(/Anfragen im 5-Minuten-Fenster: 1 von 540/.test(text)).toBe(true)
+  // 0.8: /pii prüft selbst einmal (Vorwärmen), daher 2: die Zeile und der Selbsttest
+  expect(/Anfragen im 5-Minuten-Fenster: 2 von 540/.test(text)).toBe(true)
 })
 
 test('541. Anfrage im Fenster geht nicht hinaus; die Meldung nennt die Wartezeit', OPTIONS, async ($, on) => {
@@ -1054,7 +1057,10 @@ test('Server antwortet metadata.language en auf xx: zurückgehalten, Fehler nenn
   langAnalyzer(on, false, { claim: 'en' })
   await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'x1', content: `Kunde ${NAME}` }]) as never)
   expect(textOf(session.appended().at(-1)!).includes('zurückgehalten')).toBe(true)
-  expect((await pii($)).includes('Sprache xx wird vom Server nicht unterstützt')).toBe(true)
+  // auch konfigurierte Codes nur aus der festen Liste; xx erscheint als „andere“.
+  const text = await pii($)
+  expect(text.includes('Sprache andere wird vom Server nicht unterstützt')).toBe(true)
+  expect(/xx/.test(text)).toBe(false)
 })
 
 test('jede Anfrage trägt die Kopfzeile X-Client-Version', DE_EN, async ($, on) => {
@@ -1062,7 +1068,7 @@ test('jede Anfrage trägt die Kopfzeile X-Client-Version', DE_EN, async ($, on) 
   const sent = langAnalyzer(on, false)
   await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'h1', content: `${NAME} <${MAIL}>` }]) as never)
   expect(sent.length).toBe(2)
-  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.7.2')).toBe(true)
+  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.8.0')).toBe(true)
 })
 
 // ── Wartezeiten ─────────────────────────────────────────────────
@@ -1161,9 +1167,13 @@ test('Vorwärmen in session.start wartet nicht; das Ergebnis je Sprache steht in
   await $.session.start({ cwd: '/x', surface: null, isInteractive: false } as never)
   await clock.settle()
   expect(langs).toEqual(['de', 'en'])
-  expect((await pii($)).includes('Vorwärmen: noch kein Ergebnis')).toBe(true)
   await clock.advance(500)
-  const text = await pii($)
+  // 0.8: /pii prüft selbst noch einmal und wartet darauf; die Uhr läuft nebenher weiter.
+  const asked = pii($)
+  await clock.settle()
+  await clock.advance(500)
+  const text = await asked
+  expect(langs).toEqual(['de', 'en', 'de', 'en'])
   expect(text.includes('de bereit')).toBe(true)
   expect(text.includes('en Sprache en wird vom Server nicht unterstützt')).toBe(true)
 })
@@ -1193,7 +1203,9 @@ test('400 UNSUPPORTED_LANGUAGE nennt die Sprache', { options: { ...OPTIONS.optio
   on('ui.log', () => ({ value: undefined }))
   on('clock.now', () => ({ value: 1_000_000 }))
   const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
-  expect('drop' in r && String(r.drop).includes('Sprache xx wird vom Server nicht unterstützt')).toBe(true)
+  // xx steht in keiner festen Liste und erscheint als „andere“.
+  expect('drop' in r && String(r.drop).includes('Sprache andere wird vom Server nicht unterstützt')).toBe(true)
+  expect(/xx/.test(String((r as { drop?: string }).drop))).toBe(false)
 })
 
 test('api_url nur mit https; jeder Prompt wird mit klarer Meldung verworfen, nichts geht hinaus', { options: { api_key: 'k', ui_language: 'de', language: 'de', api_url: 'http://anonym.legal' } }, async ($, on) => {
@@ -1378,25 +1390,26 @@ async function startSession($: { session: { start: (a: never) => Promise<unknown
 test('Standard ohne ui_language: Statuszeile und /pii sind englisch, nichts Deutsches (Gegenprobe)', ENGLISH, async ($, on) => {
   const { statuses, clock } = server(on, { clock: true })
   await startSession($ as never, on, clock)
-  expect(statuses.some((s) => s.includes('anonym.legal: PII protection active'))).toBe(true)
-  expect(statuses.some((s) => s.includes('PII-Schutz aktiv'))).toBe(false)
+  // 0.8: „protected“ erst nach der Prüfung durch den Server (Vorwärmen)
+  expect(statuses.some((s) => s.includes('🛡 anonym.legal · protected · 0 replaced · 0 blocked'))).toBe(true)
+  expect(statuses.some((s) => s.includes('geschützt'))).toBe(false)
   const text = await pii($)
   expect(text.split('\n')[0]).toBe('Protection against accidents, not against injected instructions and not against intent.')
   expect(text.includes('Schutz gegen Versehen')).toBe(false)
   expect(text.includes('The mapping applies to this session only.')).toBe(true)
 })
 
-test('Ohne API-Schlüssel steht in der Statuszeile englisch „no API token, prompts are blocked“', { options: { language: 'de' } }, async ($, on) => {
+test('Ohne API-Schlüssel steht in der Statuszeile englisch „not set up → … Configure“', { options: { language: 'de' } }, async ($, on) => {
   const { statuses, clock } = server(on, { clock: true })
   await startSession($ as never, on, clock)
-  expect(statuses.some((s) => s.includes('anonym.legal: no API token, prompts are blocked'))).toBe(true)
+  expect(statuses.some((s) => s.includes('⚠ anonym.legal · not set up → /plugin → anonym-legal-guard → Configure'))).toBe(true)
 })
 
 test('ui_language de: Statuszeile und /pii sind deutsch, nichts Englisches (Gegenprobe)', GERMAN, async ($, on) => {
   const { statuses, clock } = server(on, { clock: true })
   await startSession($ as never, on, clock)
-  expect(statuses.some((s) => s.includes('anonym.legal: PII-Schutz aktiv'))).toBe(true)
-  expect(statuses.some((s) => s.includes('PII protection active'))).toBe(false)
+  expect(statuses.some((s) => s.includes('🛡 anonym.legal · geschützt · 0 ersetzt · 0 blockiert'))).toBe(true)
+  expect(statuses.some((s) => s.includes('protected'))).toBe(false)
   const text = await pii($)
   expect(text.split('\n')[0]).toBe('Schutz gegen Versehen, nicht gegen eingeschleuste Anweisungen und nicht gegen Absicht.')
   expect(text.includes('Protection against accidents')).toBe(false)
@@ -1512,7 +1525,8 @@ test('Kontomodus: Vorwärmen macht eine Anfrage ohne Sprache; /pii und Statuszei
   const text = await pii($)
   expect(text.includes('languages: account (de, en)')).toBe(true)
   expect(text.includes('Warm-up: account ready: de,en')).toBe(true)
-  expect(statuses.some((s) => s.includes('languages: account (de, en)'))).toBe(true)
+  // 0.8: die Statuszeile nennt Zustand und Zähler, die Kontosprachen stehen in /pii
+  expect(statuses.some((s) => s.includes('🛡 anonym.legal · protected'))).toBe(true)
 })
 
 test('Kontomodus mit ui_language de: /pii nennt Sprache: Konto (de, en), Vorwärmen bereit: de,en', { options: { ...BASE, ui_language: 'de' } }, async ($, on) => {
@@ -1632,7 +1646,7 @@ test('0.7.2 /pii-settings: Profile sind gültiges JSON und setzen nur bekannte O
   expect(settingsReport({}, 'en', '0.7.2').includes('api_key            NOT SET')).toBe(true)
 })
 
-test('0.7.2 Codex: allow_values verrutscht nicht bei Zeichen, die klein geschrieben länger werden (İ)', () => {
+test('0.7.2: allow_values verrutscht nicht bei Zeichen, die klein geschrieben länger werden (İ)', () => {
   const allow = new Set(['claude'])
   const text = 'İİİİİİİ Claude Anna.'
   const anna = Array.from(text).indexOf('A')
@@ -1641,8 +1655,254 @@ test('0.7.2 Codex: allow_values verrutscht nicht bei Zeichen, die klein geschrie
   expect(insideAllowed(text, { entity_type: 'PERSON', start: cl, end: cl + 6, text: 'Claude', score: 0.9 }, allow)).toBe(true)
 })
 
-test('0.7.2 Codex: ein Name zwischen Buchstaben bleibt ein Treffer, nur Hex/Ziffern-Stücke fallen weg', () => {
+test('0.7.2: ein Name zwischen Buchstaben bleibt ein Treffer, nur Hex/Ziffern-Stücke fallen weg', () => {
   expect(insideWord('xAnna Bergy', { entity_type: 'PERSON', start: 1, end: 10, text: 'Anna Berg', score: 0.9 })).toBe(false)
   expect(insideWord('abcAnnaxyz', { entity_type: 'PERSON', start: 3, end: 7, text: 'Anna', score: 0.9 })).toBe(false)
   expect(insideWord('commit 3f9a1c2b7e04d5a6 ok', { entity_type: 'MEDICAL_LICENSE', start: 10, end: 16, text: '1c2b7e', score: 0.9 })).toBe(true)
+})
+
+// ── 0.8: Zustand nur nach Serverprüfung, Statuszeile, Sperrmeldung mit nächstem Schritt, /pii-Selbsttest ──
+
+test('0.8 Kern: ohne erfolgreiche Prüfung dieser Ladung kein protected (deriveStatus)', () => {
+  expect(deriveStatus({ hasKey: false, urlProblem: false, gen: 1 })).toEqual({ state: 'unset', reason: 'no_key' })
+  expect(deriveStatus({ hasKey: true, urlProblem: true, gen: 1 })).toEqual({ state: 'failing', reason: 'bad_url' })
+  expect(deriveStatus({ hasKey: true, urlProblem: false, gen: 1 })).toEqual({ state: 'checking' })
+  expect(deriveStatus({ hasKey: true, urlProblem: false, gen: 1, lastCheck: { ok: true, status: 200, at: 5, gen: 1 } })).toEqual({ state: 'protected', httpStatus: 200 })
+  // Ohne Schlüssel hilft auch eine erfolgreiche Prüfung nicht
+  expect(deriveStatus({ hasKey: false, urlProblem: false, gen: 1, lastCheck: { ok: true, status: 200, at: 5, gen: 1 } }).state).toBe('unset')
+})
+
+test('0.8 Kern: lastCheck einer früheren Generation zählt nicht', () => {
+  const old = { ok: true, status: 200, at: 5, gen: 1 } as const
+  expect(deriveStatus({ hasKey: true, urlProblem: false, gen: 2, lastCheck: old }).state).toBe('checking')
+  expect(deriveStatus({ hasKey: true, urlProblem: false, gen: 2, lastCheck: { ...old, ok: false, status: 401 } }).state).toBe('checking')
+})
+
+test('0.8 Kern: deriveStatus ordnet 401, 402, 403, Netz, Zeitgrenze und 5xx zu; ein späterer Erfolg hebt failing auf', () => {
+  const at = (status: number | 'net' | 'timeout', ok = false) => deriveStatus({ hasKey: true, urlProblem: false, gen: 3, lastCheck: { ok, status, at: 1, gen: 3 } })
+  expect(at(401)).toEqual({ state: 'failing', reason: 'unauthorized', httpStatus: 401 })
+  expect(at(402)).toEqual({ state: 'failing', reason: 'payment', httpStatus: 402 })
+  expect(at(403)).toEqual({ state: 'failing', reason: 'forbidden', httpStatus: 403 })
+  expect(at('net')).toEqual({ state: 'failing', reason: 'network' })
+  expect(at('timeout')).toEqual({ state: 'failing', reason: 'network' })
+  expect(at(503)).toEqual({ state: 'failing', reason: 'server', httpStatus: 503 })
+  expect(at(200)).toEqual({ state: 'failing', reason: 'server', httpStatus: 200 })
+  expect(at(200, true).state).toBe('protected')
+})
+
+/** Ein Server mit umschaltbarem Status; gemerkt werden die Körper und jede Statuszeile. */
+function switchable(on: On, start: number, clock = false) {
+  const s = { status: start, bodies: 0, statuses: [] as string[] }
+  on('http.fetch', (_$, e) => {
+    if (!e.url.endsWith('/api/mcp/analyze')) return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
+    const b = JSON.parse(String(e.init?.body ?? '{}')) as Body
+    s.bodies++
+    if (s.status >= 300) return { value: { status: s.status, ok: false, headers: {}, text: '{}' } }
+    const entities: Entity[] = []
+    for (const [needle, type] of [[NAME, 'PERSON'], [MAIL, 'EMAIL_ADDRESS']] as const) {
+      const at = b.text.indexOf(needle)
+      if (at >= 0) {
+        const from = Array.from(b.text.slice(0, at)).length
+        entities.push({ entity_type: type, start: from, end: from + Array.from(needle).length, text: needle, score: 0.9 })
+      }
+    }
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ success: true, entities, metadata: { language: b.language } }) } }
+  })
+  on('ui.status', (_$, e) => {
+    s.statuses.push(JSON.stringify(e))
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  if (!clock) on('clock.now', () => ({ value: 1_000_000 }))
+  return s
+}
+
+test('0.8 ohne erfolgreiche Prüfung dieser Ladung zeigt /pii nicht geschützt', GERMAN, async ($, on) => {
+  // 500 wird nicht wiederholt (503 mit Pausen: Test „503 beim Vorwärmen“ mit eigener Uhr)
+  switchable(on, 500)
+  const text = await pii($)
+  expect(text.includes('Zustand: geschützt')).toBe(false)
+  expect(text.includes('Zustand: zurückgehalten (Serverfehler). anonym.legal ist gerade nicht erreichbar')).toBe(true)
+  expect(text.includes('Letzter HTTP-Code: 500')).toBe(true)
+})
+
+test('0.8 503 beim Vorwärmen, danach echte Anfrage 200 → protected', GERMAN, async ($, on) => {
+  const s = switchable(on, 503, true)
+  const clock = mock.clock(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/x', surface: null, isInteractive: false } as never)
+  for (let i = 0; i < 12; i++) await clock.advance(500)
+  await clock.settle()
+  expect(s.bodies > 0).toBe(true)
+  expect(s.statuses.at(-1)?.includes('zurückgehalten')).toBe(true)
+  expect(s.statuses.some((x) => x.includes('geschützt'))).toBe(false)
+  s.status = 200
+  const r = await $.prompt.submit({ text: 'Hallo Welt' } as never)
+  expect('drop' in r).toBe(false)
+  await clock.settle()
+  expect(s.statuses.at(-1)?.includes('🛡 anonym.legal · geschützt · 0 ersetzt · 0 blockiert')).toBe(true)
+})
+
+for (const [status, lang, must] of [
+  [401, 'de', ['/plugin → anonym-legal-guard → Configure', 'https://anonym.legal/app/settings?tab=developer', 'Token ungültig oder abgelaufen']],
+  [401, 'en', ['/plugin → anonym-legal-guard → Configure', 'https://anonym.legal/app/settings?tab=developer']],
+  [402, 'de', ['https://anonym.legal/app/billing (Abrechnung)']],
+  [402, 'en', ['https://anonym.legal/app/billing (billing)']],
+  [403, 'de', ['https://anonym.legal/pricing']],
+  [403, 'en', ['https://anonym.legal/pricing']],
+  [500, 'de', ['später erneut versuchen', 'Status: /pii']],
+] as const) {
+  test(`0.8 HTTP ${status} (${lang}): die Sperrmeldung nennt den nächsten Schritt`, { options: { ...BASE, language: 'de', ui_language: lang } }, async ($, on) => {
+    switchable(on, status)
+    const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+    expect('drop' in r).toBe(true)
+    for (const m of must) expect(String((r as { drop: string }).drop).includes(m)).toBe(true)
+  })
+}
+
+test('0.8 ohne Token: die Sperrmeldung nennt Configure und die Installationsanleitung', { options: { language: 'de', ui_language: 'de' } }, async ($, on) => {
+  switchable(on, 200)
+  const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+  const drop = String((r as { drop?: string }).drop)
+  expect(drop.includes('/plugin → anonym-legal-guard → Configure')).toBe(true)
+  expect(drop.includes('https://anonym.legal/features/claude-code#installation')).toBe(true)
+})
+
+test('0.8 /pii löst eine Prüfanfrage aus und nennt den Zustand', GERMAN, async ($, on) => {
+  const s = switchable(on, 200)
+  expect(s.bodies).toBe(0)
+  const text = await pii($)
+  expect(s.bodies).toBe(1)
+  expect(text.split('\n')[0]).toBe('Schutz gegen Versehen, nicht gegen eingeschleuste Anweisungen und nicht gegen Absicht.')
+  expect(text.includes('Zustand: geschützt')).toBe(true)
+  expect(text.includes('anonym-legal-guard 0.8.0')).toBe(true)
+  expect(text.includes('Token gesetzt: ja')).toBe(true)
+  expect(text.includes('test-key')).toBe(false)
+  expect(text.includes('Letzter HTTP-Code: 200')).toBe(true)
+})
+
+test('0.8 /pii ohne Token: kein Netz, Zustand nicht eingerichtet, Token gesetzt: nein', { options: { language: 'de', ui_language: 'de' } }, async ($, on) => {
+  const s = switchable(on, 200)
+  const text = await pii($)
+  expect(s.bodies).toBe(0)
+  expect(text.includes('Zustand: nicht eingerichtet')).toBe(true)
+  expect(text.includes('Token gesetzt: nein')).toBe(true)
+})
+
+test('0.8 Statuszeile blockiert den Schutzpfad nicht', GERMAN, async ($, on) => {
+  const session = mock.session(on)
+  on('http.fetch', (_$, e) => {
+    const b = JSON.parse(String(e.init?.body ?? '{}')) as Body
+    const at = b.text.indexOf(NAME)
+    const entities = at >= 0 ? [{ entity_type: 'PERSON', start: at, end: at + NAME.length, text: NAME, score: 0.9 }] : []
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ success: true, entities, metadata: { language: b.language } }) } }
+  })
+  // Grenze dieses Tests (gemessen 2026-11-19): `$.ui.status` ist `void`; weder ein werfender Hook noch
+  // `{ deny }` lässt den Aufruf im Testbaukasten scheitern. Der Test zeigt, dass eine verweigernde
+  // Statuszeile den Schutzpfad nicht stört; dass ein Wurf ihn nicht erreicht, sichert der Aufbau
+  // (`void refreshUi($)`, eigenes try/catch), nicht dieser Test.
+  let failedCalls = 0
+  on('ui.status', () => {
+    failedCalls++
+    return { deny: 'Statuszeile kaputt' } as never
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 1_000_000 }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+  expect('drop' in r).toBe(false)
+  await $.session.append(row('prompt', [{ type: 'text', text: `Hallo ${NAME}` }]) as never)
+  const stored = textOf(session.appended().at(-1)!)
+  expect(stored.includes(NAME)).toBe(false)
+  expect(TOK('PERSON').test(stored)).toBe(true)
+  expect(failedCalls > 0).toBe(true)
+})
+
+test('0.8 Statuszeile enthält nie den Token oder einen Klarwert', { options: { ...BASE, api_key: 'geheim-tok-4711', language: 'de', ui_language: 'de' } }, async ($, on) => {
+  mock.session(on)
+  const s = switchable(on, 200, true)
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/x', surface: null, isInteractive: false } as never)
+  await clock.settle()
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'z1', content: `${NAME} <${MAIL}>` }]) as never)
+  await clock.settle()
+  s.status = 401
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'z2', content: `${NAME} wieder` }]) as never)
+  await clock.settle()
+  expect(s.statuses.length > 0).toBe(true)
+  expect(s.statuses.some((x) => x.includes('geschützt · 2 ersetzt'))).toBe(true)
+  expect(s.statuses.at(-1)?.includes('⚠ anonym.legal · zurückgehalten:')).toBe(true)
+  for (const x of s.statuses) {
+    expect(x.includes('geheim-tok-4711')).toBe(false)
+    expect(x.includes(NAME)).toBe(false)
+    expect(x.includes(MAIL)).toBe(false)
+  }
+})
+
+test('0.8 Statuszeile ohne Token: nicht eingerichtet → Configure (en)', { options: { language: 'de' } }, async ($, on) => {
+  const s = switchable(on, 200, true)
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/x', surface: null, isInteractive: false } as never)
+  await clock.settle()
+  expect(s.statuses.at(-1)?.includes('⚠ anonym.legal · not set up → /plugin → anonym-legal-guard → Configure')).toBe(true)
+  expect(s.bodies).toBe(0)
+})
+
+// ── Sprachfehler als failing, safeUi, Zeitstempel je Anfrage ──
+
+test('0.8 Kern: safeUi fängt einen werfenden und einen ablehnenden Callback, ein guter läuft', async () => {
+  expect(await safeUi(() => {
+    throw new Error('Statuszeile kaputt')
+  })).toBe(false)
+  expect(await safeUi(() => Promise.reject(new Error('später kaputt')))).toBe(false)
+  let ran = 0
+  expect(await safeUi(() => {
+    ran++
+  })).toBe(true)
+  expect(ran).toBe(1)
+})
+
+test('0.8 Kern: deriveStatus — Sprachfehler ist failing/language, mit HTTP-Code', () => {
+  expect(deriveStatus({ hasKey: true, urlProblem: false, gen: 4, lastCheck: { ok: false, status: 200, at: 1, gen: 4, language: true } })).toEqual({
+    state: 'failing',
+    reason: 'language',
+    httpStatus: 200,
+  })
+})
+
+test('0.8 falsche Sprache (Server antwortet en auf xx): Statuszeile und /pii zeigen failing/language, Sperrmeldung nennt das Feld language', { options: { ...BASE, language: 'xx', ui_language: 'de' } }, async ($, on) => {
+  // Der Server antwortet immer mit metadata.language en
+  const s = { statuses: [] as string[] }
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ success: true, entities: [], metadata: { language: 'en' } }) } }))
+  on('ui.status', (_$, e) => {
+    s.statuses.push(JSON.stringify(e))
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 1_000_000 }))
+  const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+  const drop = String((r as { drop?: string }).drop)
+  expect(drop.includes('Die gewählte Sprache wird vom Server nicht geprüft; Prompt nicht gesendet. Sprache einstellen: /plugin → anonym-legal-guard → Configure (Feld language). Status: /pii.')).toBe(true)
+  expect(s.statuses.at(-1)?.includes('⚠ anonym.legal · zurückgehalten: Sprache nicht geprüft → /pii')).toBe(true)
+  expect(s.statuses.some((x) => x.includes('geschützt'))).toBe(false)
+  const text = await pii($)
+  expect(text.includes('Zustand: zurückgehalten (Sprache nicht geprüft)')).toBe(true)
+  expect(text.includes('Zustand: geschützt')).toBe(false)
+})
+
+test('0.8 Kontomodus ohne languages_used: Statuszeile und /pii zeigen failing/language (en)', { options: { ...BASE } }, async ($, on) => {
+  const s = switchable(on, 200)
+  const r = await $.prompt.submit({ text: `Hallo ${NAME}` } as never)
+  const drop = String((r as { drop?: string }).drop)
+  expect(drop.includes('Configure (field language)')).toBe(true)
+  expect(s.statuses.at(-1)?.includes('⚠ anonym.legal · withheld: language not checked → /pii')).toBe(true)
+  const text = await pii($)
+  expect(text.includes('State: withheld (language not checked)')).toBe(true)
+  expect(s.statuses.some((x) => x.includes('protected'))).toBe(false)
 })

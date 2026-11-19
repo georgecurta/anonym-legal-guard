@@ -1,6 +1,6 @@
 {
   "name": "anonym-legal-guard",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Preview by anonym.legal: replaces detected personal data with placeholders before text goes to the model. Protection against accidents, not against injected instructions and not against intent. Detection is not complete. Requires an anonym.legal account (Basic, Pro or Business).",
   "author": {
     "name": "anonym.legal"
@@ -10,7 +10,7 @@
     "api_key": {
       "type": "string",
       "title": "API token (anonym.legal)",
-      "description": "Required. anonym.legal → Settings → Developer → API Access Token. Without it every prompt is withheld. Stored as a secret, never in the repository.",
+      "description": "Required. anonym.legal → Settings → Developer → API Access Token. Without it every prompt is withheld. Stored as a secret, never in the repository. Only this field is needed; all others have defaults.",
       "sensitive": true
     },
     "ui_language": {
@@ -115,7 +115,7 @@
     "ignore_types": {
       "type": "string",
       "title": "Ignored types",
-      "description": "If left empty: URL,DATE_TIME,NRP,ORGANIZATION (in code these are mostly false matches; evaluation of 2026-11-16). Comma-separated entity types that are not replaced.",
+      "description": "If left empty: URL,DATE_TIME,NRP,ORGANIZATION (in code these are mostly false matches). Comma-separated entity types that are not replaced.",
       "default": "URL,DATE_TIME,NRP,ORGANIZATION"
     },
     "scan_hook_context": {

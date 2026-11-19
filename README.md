@@ -4,10 +4,33 @@
 
 A mod for [Claude Code](https://docs.claude.com/en/docs/claude-code) by [anonym.legal](https://anonym.legal).
 Before text goes to the model, it replaces detected personal data (names, e-mail addresses, IBANs, phone
-numbers and more) with placeholders such as `‹PERSON_1·k7p›`. You keep reading and writing the real values.
+numbers and more) with placeholders such as `‹PERSON_1·k7p›`. In the terminal and the desktop app (as long as no other surface is attached) you read the
+answers with the real values; files Claude writes get the real values back.
 
 > **Preview.** Protection against accidents, not against injected instructions and not against intent.
-> Detection is not complete. Read [Limits](#limits) before you use it with real data.
+> Detection misses values. Read [Limits](#limits) before you use it with real data.
+
+## Where it works
+
+| Claude Code on … | Mod runs, replaces before the model, blocks | Status line, side panel, band | Real names in answers |
+|---|---|---|---|
+| Terminal (your machine) | yes | yes | yes |
+| Desktop app (your machine) | yes | yes | yes, as long as no remote access is attached |
+| VS Code (your machine) | expected, unmeasured | not yet checked | no, placeholders |
+| Phone (Remote Control) and other surfaces | the mod runs on your machine | not yet checked | no, placeholders |
+| **The web (claude.ai/code)** | **not supported** | – | – |
+
+Real names appear in the terminal and in the desktop app (as long as no remote access is attached), because
+there the mod assumes that the display stays on your machine (the surface reports its own name). Files Claude writes get the real values
+everywhere (`file_values: real`, the default).
+
+### Not supported: Claude Code on the web
+
+Do not rely on the mod in Claude Code on the web (claude.ai/code):
+
+1. Anthropic receives the prompt there in plain text first; the session title, for example, is built from it.
+2. The mapping between placeholder and real value would sit on Anthropic's cloud machine instead of your computer.
+3. Answers keep the placeholders, and the status line and side panel do not appear.
 
 ## Requirements
 
@@ -15,9 +38,15 @@ numbers and more) with placeholders such as `‹PERSON_1·k7p›`. You keep read
 - An anonym.legal account on **Basic, Pro or Business** and its API token (see step 1). Every check is
   billed in tokens like an API call.
 
-## Install
+## Install (3 steps)
 
-### 1. Get your API token from anonym.legal
+In short: copy your token, install the mod and enter the token, check with `/pii`.
+
+```
+/plugin install anonym-legal-guard --marketplace georgecurta/anonym-legal-guard
+```
+
+### 1. Copy your API token from anonym.legal
 
 1. Sign in at [anonym.legal](https://anonym.legal/auth/signin). No account yet? Register, then choose
    Basic, Pro or Business under [Pricing](https://anonym.legal/pricing). A Free account has no API token.
@@ -28,7 +57,7 @@ numbers and more) with placeholders such as `‹PERSON_1·k7p›`. You keep read
 Keep the token secret: anyone who has it can use your account's tokens. **Regenerate** gives you a new
 token and stops the old one at once, also in the anonym.legal Chrome extension, which uses the same token.
 
-### 2. Install the mod
+### 2. Install the mod and enter the token
 
 At the prompt of a Claude Code terminal session:
 
@@ -39,19 +68,21 @@ At the prompt of a Claude Code terminal session:
 Or from a shell:
 
 ```
-claude plugin install anonym-legal-guard --marketplace georgecurta/anonym-legal-guard
+claude plugin marketplace add georgecurta/anonym-legal-guard
+claude plugin install anonym-legal-guard@anonym-legal
 ```
 
 Answer `y` to add the marketplace, then pick a scope: **user** (all your projects) or **project** (only
 the current folder).
 
-In the desktop app: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with
-`georgecurta/anonym-legal-guard`, then **Add plugin**.
+In the desktop app: **Plugins → Add → Add marketplace → URL `georgecurta/anonym-legal-guard` → Sync** (it accepts only a GitHub owner/repo or a Git URL),
+then install the mod. If you already installed the mod in the
+terminal, the desktop app has it too ("Installed locally"); adding the marketplace again reports "A marketplace
+with the same name … already exists".
 
-### 3. Enter the token
-
-Right after the install, Claude Code shows the mod's options. Paste the token into
-**API token (anonym.legal)** (`api_key`) and save. Two more choices in the same dialog:
+Then enter the token: type `/plugin`, choose **anonym-legal-guard**, then **Configure**, paste the token into
+**API token (anonym.legal)** (`api_key`) and save. Only `api_key` needs a value; every other option has a
+default. Two you may want to set in the same dialog:
 
 - **Interface language** (`ui_language`): `en` (default) or `de` for the mod's messages, status line and `/pii`.
 - **Detection languages** (`language`): `account` (default) uses the automatic detection languages saved in
@@ -65,26 +96,39 @@ To enter or change the token later:
 - or from a shell: `claude plugin configure anonym-legal-guard` lists the options and shows which are not
   set yet.
 
-The token is marked as secret: Claude Code keeps it in its own credential storage, not in your project
-files, so it does not end up in a git repository.
+The token is stored by Claude Code's configure dialog: Claude Code keeps sensitive values in its secure
+storage, not in your project files, so it does not end up in a git repository. The mod itself cannot set
+the token.
 
-### 4. Check that it works
+### 3. Check with `/pii`
 
-Start a new Claude Code session. The status line shows `anonym.legal: PII protection active`; without a
-token it shows `anonym.legal: no API token, prompts are blocked`. Type `/pii` at any time: it shows
-`anonym.legal PII protection: active (https://anonym.legal, languages: account (de, en))`, what the mod has
-replaced in this session and whether anonym.legal answered.
+Type `/pii`. The status line shows `🛡 anonym.legal · protected` only after the check with the anonym.legal
+server has succeeded. `/pii` also shows what the mod has replaced in this session and whether anonym.legal
+answered.
 
-If the token is missing, wrong or the plan has no access, every prompt is withheld with a message saying
-why:
+If the token is missing, wrong or the plan has no access, every prompt is withheld, and a band above the input
+names the problem and the next step:
 
 | Message | Meaning | What to do |
 |---|---|---|
-| `no API token set` | no token entered | step 3 |
-| `Token invalid (HTTP 401)` | token wrong or regenerated | copy the current token again (step 1, 3) |
+| `no API token set` | no token entered | step 2 |
+| `Token invalid (HTTP 401)` | token wrong or regenerated | copy the current token again (step 1, 2) |
 | `Plan without access to the mod (HTTP 403 …)` | Free plan | choose Basic, Pro or Business |
 | `No tokens left (HTTP 402)` | no tokens left this month | buy tokens or wait for the next month |
 | `The server reported no detection languages for this account` | `account` found no language | set languages in your account or enter codes in `language` |
+
+## Firewall view
+
+The mod shows states and counts, never the values themselves.
+
+- **Status line:** `🛡 anonym.legal · protected · N replaced · M blocked`. It says `protected` only after a
+  successful check with the server; otherwise a note below the input says what to do next.
+- **Side panel:** in the terminal and the desktop app, `/pii` opens it on the right (it needs a wide window): state, last check and
+  counts per type, such as names or IBANs. A short notice appears at the top right when something changes.
+- **Blocking band:** above the input when a prompt is withheld, with the problem and the next step.
+
+Checked in the terminal and in the desktop app; not yet checked in VS Code. None of these appear in Claude
+Code on the web.
 
 With `ui_language: de` the same messages appear in German.
 
@@ -135,8 +179,8 @@ the Chrome extension. Your anonym.legal account and plan stay as they are.
 
 `/pii` shows what the mod did in this session, its switches and whether anonym.legal answered.
 
-The mapping between placeholder and real value stays in the session on your machine. anonym.legal does not
-keep it.
+When Claude Code runs on your machine (terminal, desktop app; VS Code is expected to work but is unmeasured), the mapping between placeholder and
+real value stays in the session there. anonym.legal does not keep it.
 
 ## Limits
 
@@ -153,8 +197,16 @@ keep it.
   strict mode.
 - **`--safe-mode`,** or three crashes of the mod runtime, switch the mod off.
 - **After `--resume`,** old placeholders cannot be translated back; writing with them is refused.
+- **Real names on screen only in the terminal and the desktop app** (as long as no remote access is attached).
+  VS Code, Remote Control and other surfaces show placeholders. **Claude Code on the web is not supported** (see [Where it works](#where-it-works)).
+- **Not checked: `gitStatus` and results of the built-in web search.** Claude Code adds `gitStatus` (branch, recent commit messages) to the request itself, and the mod does not rewrite it; results of the API's own web search arrive on the provider side and are not checked either. Images in the prompt can only be refused. Keep personal data out of both.
+- **If the display fails inside Claude Code itself,** the app may show the original tool line; on a remote
+  surface that would be real values.
+- **The desktop app shows real values as long as it is the only attached surface.** Each surface reports its
+  own name; this protects against accidents, it is not a check.
 - **Team and Enterprise sign-ins:** Claude Code can run its own built-in guard first; a mod you install
-  yourself may then not see every input. For organisations, deploy it as a managed mod.
+  yourself may then not see every input. Central rollout for organisations is in preparation; until then each
+  person installs the mod.
 - **Languages:** by default the mod uses your account's detection languages (`account`); or set `language` to
   the languages of your texts, for example `de` or `de,en` (at most three).
   Each extra language checks every text again and costs tokens. Since 2026-11-18 the server keeps a name hit
