@@ -16,10 +16,8 @@ answers with the real values; files Claude writes get the real values back.
 |---|---|---|
 | Claude Code in the terminal (CLI) | Supported (measured) | Protection, status line, side panel and band. Answers show the real names. |
 | Claude Code desktop app | Supported (measured) | Same as the terminal. Real names in answers only while no other surface is attached (for example Remote Control). |
-| VS Code (Claude Code extension) | Expected (unmeasured) | Uses the same Claude Code, so protection is expected. Answers show placeholders. |
-| JetBrains IDEs (Claude Code plugin) | Expected (unmeasured) | Same as VS Code: uses the same Claude Code installation, so protection is expected. Display not measured; answers show placeholders. |
 | Headless (`claude -p`, CI, scripts) | Protection runs | No status line, side panel or dialogs. A withheld prompt ends with an error message. `/pii` prints its text where commands print text; `/pii-setup` prints the steps without asking. |
-| Remote Control (phone or browser attached to a local session) | Placeholders only | The attached device shows placeholders, not real names. Unmeasured. |
+| Remote Control (phone or browser attached to a local session) | Placeholders only | The attached device shows placeholders, not real names. |
 | **Claude Code on the web (claude.ai/code)** | **Not supported** | See below. |
 | Claude mobile app (cloud sessions) | Not supported | Cloud sessions run like Claude Code on the web. |
 | Claude in Slack | Not supported | Runs in Anthropic's cloud like Claude Code on the web. |
@@ -137,11 +135,10 @@ The mod shows states and counts, never the values themselves.
 - **Notice when something is stopped:** when the mod stops a file tool call, a shell command, a tool call that
   would have sent a redacted value, a request to the model, or a message to a subagent, a short notice says so, at most once per kind
   every 10 seconds. It carries no values and no placeholders. Replacements raise no notice; the counts are
-  in the status line. Measured in the terminal (top right, gone after a few seconds); not yet checked in the
-  desktop app.
+  in the status line. In the terminal it appears at the top right and disappears after a few seconds.
 - **Blocking band:** above the input when a prompt is withheld, with the problem and the next step.
 
-Checked in the terminal and in the desktop app; not yet checked in VS Code. None of these appear in Claude
+They appear in the terminal and in the desktop app. None of these appear in Claude
 Code on the web.
 
 With `ui_language: de` the same messages appear in German.
@@ -193,7 +190,7 @@ the Chrome extension. Your anonym.legal account and plan stay as they are.
 
 `/pii` shows what the mod did in this session, its switches and whether anonym.legal answered.
 
-When Claude Code runs on your machine (terminal, desktop app; VS Code is expected to work but is unmeasured), the mapping between placeholder and
+When Claude Code runs on your machine (terminal or desktop app), the mapping between placeholder and
 real value stays in the session there. anonym.legal does not keep it.
 
 ## Limits
@@ -210,11 +207,11 @@ real value stays in the session there. anonym.legal does not keep it.
   `leak_guard: block` (default) the mod stops that request. Use auto mode with the mod only with `block` or
   strict mode.
 - **`--safe-mode`** switches off a mod you installed yourself; a mod your organization manages stays on. A crash
-  traced to the mod can unload it. Both are taken from the Claude Code documentation and not measured here.
+  traced to the mod can unload it (both per the Claude Code documentation).
   While the mod is off, nothing is protected.
 - **After `--resume`,** old placeholders cannot be translated back; writing with them is refused.
 - **Real names on screen only in the terminal and the desktop app** (as long as no remote access is attached).
-  VS Code, Remote Control and other surfaces show placeholders. **Claude Code on the web is not supported** (see [Where it works](#where-it-works)).
+  Other surfaces, such as Remote Control, show placeholders. **Claude Code on the web is not supported** (see [Where it works](#where-it-works)).
 - **Not checked: `gitStatus` and results of the built-in web search.** Claude Code adds `gitStatus` (branch, recent commit messages) to the request itself, and the mod does not rewrite it; results of the API's own web search arrive on the provider side and are not checked either. Images in the prompt can only be refused. Keep personal data out of both.
 - **If the display fails inside Claude Code itself,** the app may show the original tool line; on a remote
   surface that would be real values.

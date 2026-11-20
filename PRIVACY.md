@@ -8,7 +8,7 @@ production service. Not a legal opinion.
 | Text that would go to the model: prompts, file contents, command output, attachments, summaries, decoded base64/hex sections | **anonym.legal**, `https://anonym.legal/api/mcp/analyze`, over HTTPS | for detection only; how anonym.legal stores and logs is described in its [privacy policy](https://anonym.legal/privacy) |
 | The same text with detected values replaced | **your model provider** (Anthropic) | this is Claude Code's own connection; anonym.legal is not part of it |
 | Values the detection missed | **your model provider** | see Limits in the README |
-| Mapping placeholder ↔ real value | **stays in the session on your machine** when Claude Code is installed and runs there (terminal, desktop app; VS Code is expected to work but is unmeasured) | measured: no file under `~/.claude` other than the transcript holds it. Claude Code on the web (claude.ai/code) is not supported: there the mapping would sit on Anthropic's cloud machine, and Anthropic receives the prompt in plain text first |
+| Mapping placeholder ↔ real value | **stays in the session on your machine** when Claude Code is installed and runs there (terminal or desktop app) | measured: no file under `~/.claude` other than the transcript holds it. Claude Code on the web (claude.ai/code) is not supported: there the mapping would sit on Anthropic's cloud machine, and Anthropic receives the prompt in plain text first |
 | Clear text of files the model read | **Claude Code's local transcript** (`~/.claude/projects/…`) | written by Claude Code, not by the mod |
 
 The mod calls no other host, unless you point `api_url` elsewhere and switch on `allow_other_host`. In the
