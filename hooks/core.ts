@@ -1153,7 +1153,7 @@ export function insideAllowed(text: string, e: Entity, allow: ReadonlySet<string
 export function insideWord(text: string, e: Entity): boolean {
   if (typeof e.start !== 'number' || typeof e.end !== 'number') return false
   const cps = Array.from(text)
-  const before = e.start > 0 ? cps[e.start - 1] : ''
+  const before = (e.start > 0 ? cps[e.start - 1] : '') ?? ''
   const after = cps[e.end] ?? ''
   const value = cps.slice(e.start, e.end).join('')
   // Nur Stücke aus Hex- oder Ziffernfolgen (Hashes, Kennungen). Ein Name zwischen Buchstaben bleibt ein
@@ -1321,4 +1321,71 @@ export function reasonOf(status: number | 'net' | 'timeout' | undefined): GuardR
   if (status === 403) return 'forbidden'
   if (status === 'net' || status === 'timeout') return 'network'
   return 'server'
+}
+
+/** Arten einer Absage des Mods (0.9). */
+export type RefuseKind = 'files' | 'shell' | 'egress' | 'request' | 'send' | 'count'
+/**
+ * Absagen, die sich als Toast melden. Zählanfragen (`count`) nicht: sie sind intern, häufig und auch bei
+ * `leak_guard: log` gesperrt.
+ */
+export const TOAST_KINDS: ReadonlySet<Exclude<RefuseKind, 'count'>> = new Set(['files', 'shell', 'egress', 'request', 'send'] as const)
+/** Höchstens ein Toast je Art in dieser Zeit. */
+export const TOAST_WINDOW_MS = 10_000
+
+/**
+ * Der feste Vorspann, den Claude Code vor die Zeilen eines Befehls setzt (gemessen 2026-11-20, Claude Code
+ * 2.1.329). Er trägt keinen Inhalt des Nutzers. Ändert die Engine den Wortlaut, wird die Zeile wieder geprüft.
+ */
+export const COMMAND_CAVEAT =
+  "<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"
+
+/** Die zwei festen Ausgaben des Einstellungsdialogs von Claude Code (gemessen 2026-11-20, 2.1.329). Kein Nutzerinhalt. */
+const PLUGIN_DIALOG_OUTPUTS: ReadonlySet<string> = new Set(['Saved plugin options', 'Kept plugin options'])
+
+/**
+ * Ob ein Textblock der Tür `command` zu einem eigenen Befehl des Mods gehört und deshalb ohne Prüfung durchgeht
+ * (0.9). Ein Befehl kommt als drei Zeilen an: der Vorspann der Engine, der Aufruf und die Ausgabe. Durch gehen nur
+ * diese genauen Formen: der Vorspann wortgleich; der Aufruf eines eigenen Befehls ohne Argumente; eine Ausgabe,
+ * deren Text der Mod selbst gerade zurückgegeben hat. Alles andere wird geprüft wie jede Zeile, und ohne Token
+ * zurückgehalten. Grund: ohne Token sah man sonst weder `/pii` noch die Anleitung aus `/pii-setup`.
+ */
+export function ownCommandText(text: string, own: { plugin: string; commands: readonly string[]; outputs: ReadonlySet<string> }): boolean {
+  const s = text.trim()
+  if (s === COMMAND_CAVEAT) return true
+  const call = /^<command-name>\/([a-z-]+)<\/command-name>\s*<command-message>([a-z-]+)<\/command-message>\s*<command-args><\/command-args>$/.exec(s)
+  if (call) return call[1] === call[2] && (call[1] === 'plugin' || own.commands.includes(call[1] ?? ''))
+  // Der Einstellungsdialog von Claude Code für diesen Mod (0.9): `/plugin configure <mod>`, gleich mit welchem Marktplatz.
+  const configure = /^<command-name>\/plugin<\/command-name>\s*<command-message>plugin<\/command-message>\s*<command-args>configure ([a-z0-9-]+)(@[a-z0-9._-]+)?<\/command-args>$/.exec(s)
+  if (configure) return configure[1] === own.plugin
+  const open = '<local-command-stdout>'
+  const close = '</local-command-stdout>'
+  if (!s.startsWith(open) || !s.endsWith(close)) return false
+  let body = s.slice(open.length, s.length - close.length)
+  if (body.startsWith(`${own.plugin}: `)) body = body.slice(own.plugin.length + 2)
+  return own.outputs.has(body.trim()) || PLUGIN_DIALOG_OUTPUTS.has(body.trim())
+}
+
+/**
+ * Ob eine Änderung an einer `/config`-Zeile den Mod betrifft und durchgehen darf (0.9). Die Optionen des
+ * Mods ändert nur die Hand am Rechner: Herkunft `composer` (gemessen: so kommt eine Änderung über `/config` an).
+ * Die Remote-Control-Brücke (`bridge`, laut Typdatei „not attestably the owner's hand“), ein fremder Mod (`plugin`)
+ * und jede unbekannte Herkunft werden abgelehnt, auch wenn die Änderung den Schutz verstärken würde: der Wächter
+ * bewertet keine Werte. Zeilen anderer Besitzer gehen ihn nichts an (`foreign`).
+ *
+ * Grenze: Der Configure-Dialog von Claude Code, `claude plugin configure` und Einstellungsdateien lösen das
+ * Ereignis nicht aus (Dialog gemessen, die beiden anderen nicht); dort greift der Wächter nicht.
+ */
+export function ownOptionChange(key: string, origin: unknown, plugin = 'anonym-legal-guard'): 'allow' | 'deny' | 'foreign' {
+  if (!key.startsWith(`${plugin}.`)) return 'foreign'
+  const kind = origin && typeof origin === 'object' && 'kind' in origin ? (origin as { kind: unknown }).kind : undefined
+  return kind === 'composer' ? 'allow' : 'deny'
+}
+
+/**
+ * Ob der gespeicherte „letzte Fehler“ ein Einrichtungsfehler ist, der mit dem geprüften Schutz erledigt ist
+ * (0.9): kein Token, Adresse, HTTP 401/402/403. `/pii` zeigte ihn sonst weiter, obwohl der Zustand „geschützt“ ist.
+ */
+export function setupErrorResolved(code: unknown, state: GuardState): boolean {
+  return state === 'protected' && typeof code === 'string' && ['own:noKey', 'own:url', 'http:401', 'http:402', 'http:403'].includes(code)
 }

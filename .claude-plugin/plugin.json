@@ -1,6 +1,6 @@
 {
   "name": "anonym-legal-guard",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Preview by anonym.legal: replaces detected personal data with placeholders before text goes to the model. Protection against accidents, not against injected instructions and not against intent. Detection is not complete. Requires an anonym.legal account (Basic, Pro or Business).",
   "author": {
     "name": "anonym.legal"
@@ -25,13 +25,13 @@
     },
     "language": {
       "type": "string",
-      "title": "Detection languages",
+      "title": "Detection languages (default: account)",
       "description": "If left empty: account. account: the automatic detection languages saved in your anonym.legal account (Settings → Language). Or codes separated by commas, at most three, e.g. de or de,en. Each extra language checks every text again and costs tokens.",
       "default": "account"
     },
     "api_url": {
       "type": "string",
-      "title": "API address",
+      "title": "API address (default: https://anonym.legal)",
       "description": "If left empty: https://anonym.legal. Address of anonym.legal. https only. A host other than anonym.legal needs allow_other_host.",
       "default": "https://anonym.legal"
     },
@@ -43,7 +43,7 @@
     },
     "preset": {
       "type": "string",
-      "title": "Preset",
+      "title": "Preset (default: none)",
       "description": "If left empty: no preset. Name of an anonym.legal preset, e.g. developer.",
       "default": ""
     },
@@ -108,13 +108,13 @@
     },
     "min_score": {
       "type": "number",
-      "title": "Minimum detection score",
+      "title": "Minimum detection score (default: 0.5)",
       "description": "If left empty: 0.5. Matches below this score are skipped (0 to 1).",
       "default": 0.5
     },
     "ignore_types": {
       "type": "string",
-      "title": "Ignored types",
+      "title": "Ignored types (default: URL, DATE_TIME, NRP, ORGANIZATION)",
       "description": "If left empty: URL,DATE_TIME,NRP,ORGANIZATION (in code these are mostly false matches). Comma-separated entity types that are not replaced.",
       "default": "URL,DATE_TIME,NRP,ORGANIZATION"
     },
@@ -126,13 +126,13 @@
     },
     "skip_attachments": {
       "type": "string",
-      "title": "Attachment kinds not checked",
+      "title": "Attachment kinds not checked (default: 7 engine kinds, see /pii-settings)",
       "description": "If left empty: the tool, skill and agent lists Claude Code writes itself. Comma-separated attachment kinds that are not checked; unknown kinds are always checked.",
       "default": "deferred_tools_delta,skill_listing,agent_listing_delta,mcp_instructions_delta,model,date,remote_session_change"
     },
     "allow_values": {
       "type": "string",
-      "title": "Allowed values",
+      "title": "Allowed values (default: Claude names, see /pii-settings)",
       "description": "If left empty: names of Claude and Anthropic (Claude, Claude Code, Opus, Sonnet, Haiku, Fable, Anthropic …), which occur in every session. Comma-separated values that are never replaced.",
       "default": "Claude,Claude Code,Claude Opus,Claude Sonnet,Claude Haiku,Claude Fable,Anthropic,Opus,Sonnet,Haiku,Fable"
     }

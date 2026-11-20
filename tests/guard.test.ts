@@ -30,10 +30,15 @@ import {
   tokenFor,
   deriveStatus,
   safeUi,
+  TOAST_KINDS,
+  COMMAND_CAVEAT,
+  ownCommandText,
+  ownOptionChange,
+  setupErrorResolved,
   type Entity,
 } from '../hooks/core'
 import { msg, parseLang } from '../hooks/messages'
-import { PROFILES, profileCommand, settingsReport } from '../hooks/settings'
+import { PROFILES, profileCommand, settingsReport, setupOptionsText, setupPlan, setupQuestions, setupTokenText } from '../hooks/settings'
 
 // Die Tests prüfen den deutschen Wortlaut und die feste Sprache de; Englisch und Kontomodus haben eigene Tests unten.
 const OPTIONS = { options: { api_key: 'test-key', api_url: 'https://pii.example', allow_other_host: true, ui_language: 'de', language: 'de' } }
@@ -1068,7 +1073,7 @@ test('jede Anfrage trägt die Kopfzeile X-Client-Version', DE_EN, async ($, on) 
   const sent = langAnalyzer(on, false)
   await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'h1', content: `${NAME} <${MAIL}>` }]) as never)
   expect(sent.length).toBe(2)
-  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.8.0')).toBe(true)
+  expect(sent.every((b) => b.header === 'ClaudeCodeMod/0.9.0')).toBe(true)
 })
 
 // ── Wartezeiten ─────────────────────────────────────────────────
@@ -1445,14 +1450,14 @@ test('shell_guard: die Ablehnung ist standardmäßig englisch', ENGLISH, async (
   runner(on)
   const v = await $.tool.check({ tool: 'Bash', input: { command: 'base64 notiz.txt' } })
   expect(v.decision).toBe('deny')
-  expect(String(v.reason)).toBe('anonym.legal: command rejected (base64 with a file as input). Protection against accidents, not a lock against intent.')
+  expect(String(v.reason)).toBe('anonym.legal: command rejected (base64 with a file as input). Protection against accidents, not a lock against intent. Details: /pii.')
 })
 
 test('shell_guard mit ui_language de: deutsche Ablehnung und Nachfrage', GERMAN, async ($, on) => {
   server(on)
   runner(on)
   const v = await $.tool.check({ tool: 'Bash', input: { command: 'base64 notiz.txt' } })
-  expect(String(v.reason)).toBe('anonym.legal: Befehl abgelehnt (base64 mit einer Datei als Eingabe). Schutz gegen Versehen, keine Sperre gegen Absicht.')
+  expect(String(v.reason)).toBe('anonym.legal: Befehl abgelehnt (base64 mit einer Datei als Eingabe). Schutz gegen Versehen, keine Sperre gegen Absicht. Einzelheiten: /pii.')
   const a = await $.tool.check({ tool: 'Bash', input: { command: 'scp notiz.txt host:' } })
   expect(String(a.reason).startsWith('anonym.legal: Befehl braucht deine Bestätigung (scp zu einem Host)')).toBe(true)
 })
@@ -1573,7 +1578,7 @@ test('Kern: isAccountOption, parseLanguages, parseLang, msg', () => {
 
 test('0.7.2 Klarwert im Verlauf: der Körper wird ersetzt statt gestoppt, danach kein Leck', () => {
   const v = tokenFor(vault0(), 'EMAIL_ADDRESS', MAIL).vault
-  const tok = knownValues(v)[0].token
+  const tok = knownValues(v)[0]!.token
   const body = JSON.stringify({ messages: [{ role: 'user', content: `alt: ${MAIL}` }, { role: 'user', content: 'weiter' }] })
   expect(stops(requestLeak(MODEL, body, v))).toBe(true)
   const r = scrubRequestBody(body, v)!
@@ -1777,7 +1782,7 @@ test('0.8 /pii löst eine Prüfanfrage aus und nennt den Zustand', GERMAN, async
   expect(s.bodies).toBe(1)
   expect(text.split('\n')[0]).toBe('Schutz gegen Versehen, nicht gegen eingeschleuste Anweisungen und nicht gegen Absicht.')
   expect(text.includes('Zustand: geschützt')).toBe(true)
-  expect(text.includes('anonym-legal-guard 0.8.0')).toBe(true)
+  expect(text.includes('anonym-legal-guard 0.9.0')).toBe(true)
   expect(text.includes('Token gesetzt: ja')).toBe(true)
   expect(text.includes('test-key')).toBe(false)
   expect(text.includes('Letzter HTTP-Code: 200')).toBe(true)
@@ -1905,4 +1910,460 @@ test('0.8 Kontomodus ohne languages_used: Statuszeile und /pii zeigen failing/la
   const text = await pii($)
   expect(text.includes('State: withheld (language not checked)')).toBe(true)
   expect(s.statuses.some((x) => x.includes('protected'))).toBe(false)
+})
+
+// ── 0.9: die Statistik ist Anzeige ─────────────────────
+// Wirft ihr Fortschreiben, darf das die Schutzentscheidung nicht ändern: die Zeile geht geschwärzt weiter,
+// nicht „zurückgehalten“, und nie im Klartext.
+/** Ein kaputter Bestand unter `stats` (Wert null in der heutigen Form): jede Fortschreibung der Statistik wirft. */
+function statsBroken(on: On) {
+  on('state.get', (_$, e, next) =>
+    String((e as { key?: unknown }).key) === 'stats' ? ({ value: { value: { shape: 'stats-2', value: null }, version: 1 } } as never) : next(e),
+  )
+}
+
+test('0.9 Statistik wirft: die Zeile geht geschwärzt weiter, nicht zurückgehalten', OPTIONS, async ($, on) => {
+  const session = mock.session(on)
+  fakeAnalyzer(on)
+  statsBroken(on)
+  await $.session.append(row('prompt', [{ type: 'text', text: `Wer ist ${NAME}?` }]) as never)
+  const stored = textOf(session.appended().at(-1)!)
+  expect(stored.includes(NAME)).toBe(false)
+  expect(TOK('PERSON').test(stored)).toBe(true)
+})
+
+test('0.9 Gegenprobe: scheitert die Erkennung, bleibt die Zeile zurückgehalten, auch wenn die Statistik wirft', OPTIONS, async ($, on) => {
+  const session = mock.session(on)
+  fakeAnalyzer(on, [], 503)
+  statsBroken(on)
+  await $.session.append(row('prompt', [{ type: 'text', text: `Wer ist ${NAME}?` }]) as never)
+  const stored = textOf(session.appended().at(-1)!)
+  expect(stored.includes(NAME)).toBe(false)
+  expect(ANY_TOK.test(stored)).toBe(false)
+})
+
+test('0.9 Befehl lässt sich nicht registrieren: Vorwärmen läuft trotzdem', OPTIONS, async ($, on) => {
+  const clock = mock.clock(on)
+  let warmed = 0
+  on('http.fetch', (_$, e) => {
+    if (e.url.endsWith('/api/mcp/analyze')) warmed++
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ success: true, entities: [], metadata: { language: 'de' } }) } }
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  let asked = 0
+  on('command.register', () => {
+    asked++
+    return Promise.reject(new Error('Registrierung gescheitert')) as never
+  })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/x', surface: null, isInteractive: false } as never)
+  await clock.settle()
+  expect(`versucht=${asked > 0}`).toBe('versucht=true') // Muss-Treffer: die Registrierung wurde versucht
+  expect(`vorgewärmt=${warmed > 0}`).toBe('vorgewärmt=true') // das Vorwärmen hat die Erkennung gefragt
+})
+
+// 0.9 (gemessen 2026-11-20, Claude Code 2.1.329): `claude plugin configure --values-stdin` nimmt nur ein
+// JSON-Objekt aus Texten an und wandelt selbst in die Art des Manifests. Echte Zahlen oder Wahrheitswerte im
+// JSON weist es ab. Der Befehl muss deshalb jeden Wert als Text tragen.
+test('0.9 Profilbefehl: jeder Wert steht als Text im JSON, auch Zahl und Schalter', () => {
+  const payload = (cmd: string) => JSON.parse(cmd.slice(cmd.indexOf("' '") + 3, cmd.lastIndexOf("'"))) as Record<string, unknown>
+  expect(payload(profileCommand(PROFILES.find((p) => p.name === 'development')!.values)).min_score).toBe('0.7') // Muss-Treffer
+  for (const p of PROFILES) for (const v of Object.values(payload(profileCommand(p.values)))) expect(typeof v).toBe('string')
+  const sw = payload(profileCommand({ detokenize_bash: 'true', scan_hook_context: 'false', min_score: '0.9' }))
+  expect(sw).toEqual({ detokenize_bash: 'true', scan_hook_context: 'false', min_score: '0.9' })
+})
+
+// ── 0.9: jede Absage meldet sich als Toast, mit festem Text und ohne Wert ──
+// Der Toast geht laut Typdatei auch an angehängte entfernte Geräte: kein Platzhalter, kein Klarwert.
+function toasts(on: On, fail = false): string[] {
+  const seen: string[] = []
+  on('ui.toast', (_$, e) => {
+    seen.push(String((e as { text?: unknown }).text))
+    return (fail ? Promise.reject(new Error('Toast kaputt')) : { value: undefined }) as never
+  })
+  return seen
+}
+/** Der Toast wird nicht abgewartet: ein paar Mikroschritte, bis er gesetzt ist. */
+const flush = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+}
+const STALE_WRITE = { tool: 'Write', file_path: '/notiz.txt', content: 'Rückruf an ‹PERSON_1·old›' }
+
+test('0.9 Toast: gestoppter Dateizugriff meldet sich einmal je Grund in 10 s; die Absage nennt /pii', OPTIONS, async ($, on) => {
+  fakeAnalyzer(on)
+  const seen = toasts(on)
+  on('tool.call', () => ({ result: {} as never }))
+  const r = await $.tool.call(STALE_WRITE as never)
+  expect('deny' in r && String(r.deny).includes('/pii')).toBe(true)
+  await flush()
+  expect(seen.length).toBe(1) // Muss-Treffer
+  expect(seen[0]!.includes('‹')).toBe(false)
+  expect(seen[0]!.includes('/pii')).toBe(true)
+  await $.tool.call(STALE_WRITE as never) // die Uhr des Tests steht: innerhalb von 10 s
+  await flush()
+  expect(seen.length).toBe(1)
+})
+
+test('0.9 Toast: scheitert der Toast, steht die Absage trotzdem', OPTIONS, async ($, on) => {
+  fakeAnalyzer(on)
+  const seen = toasts(on, true)
+  on('tool.call', () => ({ result: {} as never }))
+  const r = await $.tool.call(STALE_WRITE as never)
+  await flush()
+  expect(seen.length).toBe(1) // Muss-Treffer: der Toast wurde versucht
+  expect('deny' in r && String(r.deny).includes('nicht zurückübersetzen')).toBe(true)
+})
+
+test('0.9 Toast: abgelehnter Befehl meldet sich', OPTIONS, async ($, on) => {
+  fakeAnalyzer(on)
+  const seen = toasts(on)
+  const v = await $.tool.check({ tool: 'Bash', input: { command: 'base64 notiz.txt' } })
+  await flush()
+  expect(v.decision).toBe('deny')
+  expect(String(v.reason).includes('/pii')).toBe(true)
+  expect(seen.length).toBe(1)
+})
+
+test('0.9 Toast: shell_guard ask fragt nach und meldet keinen Toast', { options: { ...OPTIONS.options, shell_guard: 'ask' } }, async ($, on) => {
+  fakeAnalyzer(on)
+  const seen = toasts(on)
+  on('tool.check', () => ({ decision: 'allow' }) as never)
+  const v = await $.tool.check({ tool: 'Bash', input: { command: 'base64 notiz.txt' } })
+  await flush()
+  expect(v.decision).toBe('ask')
+  expect(seen.length).toBe(0)
+})
+
+async function knownName($: { session: { append: (a: never) => Promise<unknown> } }) {
+  await $.session.append(row('tool-result', [{ type: 'tool_result', tool_use_id: 'k1', content: `Name: ${NAME}` }]) as never)
+}
+
+test('0.9 Toast: Versand eines Klarwerts nach außen wird gestoppt und gemeldet', OPTIONS, async ($, on) => {
+  mock.session(on)
+  fakeAnalyzer(on)
+  const seen = toasts(on)
+  let ran = false
+  on('tool.call', () => {
+    ran = true
+    return { result: {} as never }
+  })
+  await knownName($ as never)
+  const r = await $.tool.call({ tool: 'WebFetch', url: `https://example.com/?q=${encodeURIComponent(NAME)}`, prompt: `Suche ${NAME}` } as never)
+  await flush()
+  expect(ran).toBe(false)
+  expect('deny' in r && String(r.deny).includes('/pii')).toBe(true)
+  expect(seen.length).toBe(1)
+  expect(seen[0]!.includes(NAME)).toBe(false)
+  expect(seen[0]!.includes('‹')).toBe(false)
+})
+
+test('0.9 Toast: bei leak_guard log läuft der Aufruf, also kein Toast', { options: { ...OPTIONS.options, leak_guard: 'log' } }, async ($, on) => {
+  mock.session(on)
+  fakeAnalyzer(on)
+  const seen = toasts(on)
+  let ran = false
+  on('tool.call', () => {
+    ran = true
+    return { result: {} as never }
+  })
+  await knownName($ as never)
+  await $.tool.call({ tool: 'WebFetch', url: 'https://example.com/', prompt: `Suche ${NAME}` } as never)
+  await flush()
+  expect(ran).toBe(true) // Muss-Treffer: der Aufruf lief
+  expect(seen.length).toBe(0)
+})
+
+test('0.9 Toast-Texte: fest, in beiden Sprachen, ohne Platzhalter und ohne offene Felder', () => {
+  expect([...TOAST_KINDS].sort()).toEqual(['egress', 'files', 'request', 'send', 'shell'])
+  for (const lang of ['en', 'de'] as const) {
+    for (const kind of TOAST_KINDS) {
+      const text = msg(lang, `toast_${kind}`)
+      expect(text.includes('‹')).toBe(false)
+      expect(text.includes('{')).toBe(false)
+      expect(text.includes('/pii')).toBe(true)
+    }
+    expect(msg(lang, 'refusedNext').includes('/pii')).toBe(true)
+  }
+})
+
+// ── 0.9: /pii-setup führt durch die Einrichtung und ändert nichts selbst ──
+const payloadOf = (text: string) => {
+  const line = text.split('\n').find((l) => l.includes('claude plugin configure')) ?? ''
+  return JSON.parse(line.slice(line.indexOf("' '") + 3, line.lastIndexOf("'"))) as Record<string, unknown>
+}
+
+test('0.9 setupPlan: Antworten gelten nur als genaue Auswahl; alles andere ergibt den Standard', () => {
+  const q = setupQuestions('de')
+  expect(q.language.options.length).toBe(4)
+  expect(q.profile.options.length).toBe(3)
+  const chosen = setupPlan({ language: q.language.options[3], profile: q.profile.options[1] }, 'de')
+  expect([chosen.language, chosen.profile]).toEqual(['de,en', 'strict'])
+  const cmd = payloadOf(chosen.command)
+  expect(cmd.language).toBe('de,en')
+  expect(cmd.file_values).toBe('deny') // Muss-Treffer: das Profil steht im selben Befehl
+  for (const answers of [{}, { language: 'irgendein freier Text', profile: 'noch einer' }, { language: q.language.options[3]!.toUpperCase() }]) {
+    const plan = setupPlan(answers, 'de')
+    expect([plan.language, plan.profile]).toEqual(['account', 'standard'])
+    expect(plan.command.includes('freier Text')).toBe(false)
+  }
+  const dev = payloadOf(setupPlan({ profile: setupQuestions('en').profile.options[2] }, 'en').command)
+  expect(dev.min_score).toBe('0.7') // Text: so verlangt es `--values-stdin`
+})
+
+test('0.9 setupTokenText: der Weg zum Token in drei Schritten, ohne Shell-Befehl und ohne Fragen', () => {
+  for (const lang of ['de', 'en'] as const) {
+    const text = setupTokenText({ lang, stateLine: 'S', configure: '/plugin configure anonym-legal-guard@anonym-legal' })
+    for (const n of ['1.', '2.', '3.']) expect(text.split('\n').some((l) => l.startsWith(n))).toBe(true)
+    expect(text.includes('https://anonym.legal/app/settings?tab=developer')).toBe(true)
+    expect(text.includes('/plugin configure anonym-legal-guard@anonym-legal')).toBe(true)
+    expect(text.includes('/pii')).toBe(true)
+    expect(text.includes('claude plugin configure')).toBe(false) // kein Shell-Befehl beim ersten Einrichten
+    expect(text.includes('Basic')).toBe(true)
+  }
+})
+
+test('0.9 setupOptionsText: Standardwahl braucht keinen Befehl; eine andere Wahl bekommt genau einen', () => {
+  const std = setupPlan({}, 'de')
+  expect(std.isDefault).toBe(true)
+  const none = setupOptionsText({ lang: 'de', stateLine: 'Zustand: geschützt', plan: std })
+  expect(none.includes('claude plugin configure')).toBe(false)
+  expect(none.includes('nichts zu ändern')).toBe(true)
+  const q = setupQuestions('de')
+  const strict = setupPlan({ profile: q.profile.options[1] }, 'de')
+  expect(strict.isDefault).toBe(false)
+  const some = setupOptionsText({ lang: 'de', stateLine: 'Zustand: geschützt', plan: strict })
+  expect(some.split('\n').filter((l) => l.includes('claude plugin configure')).length).toBe(1)
+  expect(payloadOf(some).file_values).toBe('deny')
+  expect(setupPlan({ language: q.language.options[1] }, 'de').isDefault).toBe(false)
+})
+
+test('0.9 /pii-setup ohne Token: Anleitung zum Token, keine Frage, und der Einstellungsdialog wird angestoßen', { options: { ui_language: 'de', language: 'de' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  const ran: string[] = []
+  on('command.run', { command: 'plugin' }, (_$, e) => {
+    ran.push(String((e as { args?: unknown }).args))
+    return { text: 'Saved plugin options' } as never
+  })
+  const text = String((await $.command.run({ command: 'pii-setup' } as never)).text)
+  expect(ran).toEqual([]) // erst nach dem Befehl, nicht währenddessen
+  await clock.settle()
+  await flush()
+  const lines = text.split('\n')
+  expect((lines[1] ?? '').startsWith('Zustand: nicht eingerichtet')).toBe(true) // Muss-Treffer
+  expect((lines[1] ?? '').includes('/pii-setup')).toBe(false)
+  expect(lines.some((l) => l.startsWith('1. Token kopieren'))).toBe(true)
+  expect(text.includes('claude plugin configure')).toBe(false)
+  expect(ran.length).toBe(1)
+  expect(/^configure anonym-legal-guard(@[a-z0-9._-]+)?$/.test(ran[0] ?? '')).toBe(true)
+  expect(text.includes(`/plugin ${ran[0]}`)).toBe(true) // der Text nennt denselben Befehl als Rückfall
+})
+
+// Rückmeldung des Eigentümers 2026-11-20: mit einem ungültigen Token fragte der Assistent nur nach Sprache und
+// Profil. Er muss erst prüfen (wie /pii) und dann wieder zum Token führen; ein leeres Feld im Dialog lässt den
+// alten Wert stehen, ein neuer Token ersetzt ihn.
+function setupWorld(on: On, status: number) {
+  const clock = mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('http.fetch', () => ({ value: { status, ok: status < 300, headers: {}, text: JSON.stringify(status < 300 ? { success: true, entities: [], metadata: { language: 'de' } } : { error: 'x', message: 'y' }) } }))
+  const ran: string[] = []
+  on('command.run', { command: 'plugin' }, (_$, e) => {
+    ran.push(String((e as { args?: unknown }).args))
+    return { text: 'Saved plugin options' } as never
+  })
+  return { clock, ran }
+}
+
+test('0.9 /pii-setup mit ungültigem Token (401): prüft erst, führt dann zum Token und stößt den Dialog an', OPTIONS, async ($, on) => {
+  const { clock, ran } = setupWorld(on, 401)
+  const asked = $.command.run({ command: 'pii-setup' } as never)
+  await clock.settle()
+  const text = String((await asked).text)
+  await clock.settle()
+  await flush()
+  expect(text.includes('Token ungültig')).toBe(true) // Muss-Treffer: der Grund steht da
+  expect(text.split('\n').some((l) => l.startsWith('1. Token kopieren'))).toBe(true)
+  expect(text.includes('ersetzt den alten')).toBe(true)
+  expect(text.includes('claude plugin configure')).toBe(false)
+  expect(ran.length).toBe(1)
+})
+
+test('0.9 /pii-setup bei anderem Fehler (402): Zustand und nächster Schritt, keine Fragen, kein Dialog', OPTIONS, async ($, on) => {
+  const { clock, ran } = setupWorld(on, 402)
+  const asked = $.command.run({ command: 'pii-setup' } as never)
+  await clock.settle()
+  const text = String((await asked).text)
+  await clock.settle()
+  await flush()
+  expect(text.includes('https://anonym.legal/app/billing')).toBe(true) // Muss-Treffer: der nächste Schritt
+  expect(text.includes('1. Token kopieren')).toBe(false)
+  expect(text.includes('nichts zu ändern')).toBe(false)
+  expect(ran).toEqual([])
+})
+
+test('0.9 /pii-setup mit Token, ohne Dialog: Standardwahl, kein Befehl, kein Anstoß des Dialogs, Token steht nirgends', OPTIONS, async ($, on) => {
+  fakeAnalyzer(on)
+  const ran: string[] = []
+  on('command.run', { command: 'plugin' }, (_$, e) => {
+    ran.push(String((e as { args?: unknown }).args))
+    return { text: '' } as never
+  })
+  const text = String((await $.command.run({ command: 'pii-setup' } as never)).text)
+  await flush()
+  expect(text.includes('nichts zu ändern')).toBe(true) // Muss-Treffer
+  expect(text.includes('claude plugin configure')).toBe(false)
+  expect(text.includes('test-key')).toBe(false)
+  expect(ran).toEqual([])
+})
+
+test('0.9 Letzter Fehler: ein Einrichtungsfehler gilt als erledigt, sobald der Schutz geprüft ist', () => {
+  for (const code of ['own:noKey', 'own:url', 'http:401', 'http:402', 'http:403']) {
+    expect(setupErrorResolved(code, 'protected')).toBe(true)
+    expect(setupErrorResolved(code, 'failing')).toBe(false)
+    expect(setupErrorResolved(code, 'unset')).toBe(false)
+  }
+  for (const code of ['net', 'timeout', 'http:500', 'lang', 'unknown', undefined]) expect(setupErrorResolved(code, 'protected')).toBe(false)
+})
+
+test('0.9 ohne Token nennen Statuszeile und nächster Schritt den Configure-Weg und /pii-setup', () => {
+  for (const lang of ['en', 'de'] as const) {
+    for (const key of ['statusUnset', 'next_no_key'] as const) {
+      const text = msg(lang, key)
+      expect(text.includes('/plugin → anonym-legal-guard → Configure')).toBe(true)
+      expect(text.includes('/pii-setup')).toBe(true)
+    }
+  }
+})
+
+// ── 0.9: die Ausgabe der eigenen Befehle wird nicht zurückgehalten ────────
+// Gemessen im Terminal (2.1.329): ein Befehl kommt als drei Zeilen der Tür `command` an: ein fester Vorspann der
+// Engine, der Aufruf (`<command-name>…`) und die Ausgabe (`<local-command-stdout><mod>: …`). Ohne Token hielt der
+// Mod alle drei zurück, also auch die eigene Anleitung aus /pii-setup. Durch gehen nur genau diese Formen der
+// eigenen Befehle; alles andere wird weiter geprüft und ohne Token zurückgehalten.
+const cmdRow = (text: string, origin: unknown = { kind: 'unclassified' }) => row('command', [{ type: 'text', text }], origin)
+const callRow = (name: string, args = '') => `<command-name>/${name}</command-name>\n            <command-message>${name}</command-message>\n            <command-args>${args}</command-args>`
+const stdoutRow = (body: string) => `<local-command-stdout>anonym-legal-guard: ${body}</local-command-stdout>`
+
+test('0.9 eigene Befehle ohne Token: Vorspann, Aufruf und Ausgabe gehen unverändert durch', { options: { ui_language: 'de', language: 'de' } }, async ($, on) => {
+  const session = mock.session(on)
+  fakeAnalyzer(on)
+  const text = String((await $.command.run({ command: 'pii-setup' } as never)).text)
+  for (const content of [COMMAND_CAVEAT, callRow('pii-setup'), stdoutRow(text)]) {
+    await $.session.append(cmdRow(content) as never)
+    expect(textOf(session.appended().at(-1)!)).toBe(JSON.stringify([{ type: 'text', text: content }]))
+  }
+  expect(textOf(session.appended().at(-1)!).includes('1. Token kopieren')).toBe(true) // Muss-Treffer: die Anleitung steht da
+})
+
+test('0.9 Gegenprobe ohne Token: fremde Ausgabe, Aufruf mit Argumenten und veränderter Vorspann bleiben zurückgehalten', { options: { ui_language: 'de', language: 'de' } }, async ($, on) => {
+  const session = mock.session(on)
+  fakeAnalyzer(on)
+  await $.command.run({ command: 'pii-setup' } as never)
+  for (const content of [
+    stdoutRow(`Kunde: ${NAME}`),
+    `<local-command-stdout>anderer-mod: Kunde ${NAME}</local-command-stdout>`,
+    callRow('pii-setup', NAME),
+    callRow('fremd'),
+    COMMAND_CAVEAT.replace('straight to the user', `straight to ${NAME}`),
+  ]) {
+    await $.session.append(cmdRow(content) as never)
+    const stored = textOf(session.appended().at(-1)!)
+    expect(stored.includes(NAME)).toBe(false)
+    expect(stored.includes('zurückgehalten')).toBe(true)
+  }
+})
+
+test('0.9 eigene Befehle mit Token: ihre Ausgabe geht nicht an die Erkennung; fremde Ausgabe wird geschwärzt', OPTIONS, async ($, on) => {
+  const session = mock.session(on)
+  const calls: string[] = []
+  fakeAnalyzer(on, calls)
+  const text = String((await $.command.run({ command: 'pii' } as never)).text)
+  calls.length = 0
+  await $.session.append(cmdRow(COMMAND_CAVEAT) as never)
+  await $.session.append(cmdRow(callRow('pii')) as never)
+  await $.session.append(cmdRow(stdoutRow(text)) as never)
+  expect(calls.length).toBe(0)
+  await $.session.append(cmdRow(stdoutRow(`Kunde: ${NAME}`)) as never)
+  expect(calls.length).toBe(1) // Muss-Treffer: fremde Ausgabe wird geprüft
+  const stored = textOf(session.appended().at(-1)!)
+  expect(stored.includes(NAME)).toBe(false)
+  expect(TOK('PERSON').test(stored)).toBe(true)
+})
+
+// Codex-Prüfung 0.9: /pii-settings gibt die Optionswerte unverändert aus (z. B. ein Preset). Seine Ausgabe geht deshalb
+// wie fremder Text durch die Erkennung; nur /pii und /pii-setup (feste Texte, bereinigte Werte) gelten als eigene Ausgabe.
+test('0.9 /pii-settings: Ausgabe mit Optionswerten wird geprüft, nicht als eigene Ausgabe durchgelassen', { options: { ...OPTIONS.options, preset: `akte ${NAME}` } }, async ($, on) => {
+  const session = mock.session(on)
+  const calls: string[] = []
+  fakeAnalyzer(on, calls)
+  const text = String((await $.command.run({ command: 'pii-settings' } as never)).text)
+  expect(text.includes(NAME)).toBe(true) // Muss-Treffer: der Wert steht im Bericht
+  calls.length = 0
+  await $.session.append(cmdRow(COMMAND_CAVEAT) as never)
+  await $.session.append(cmdRow(callRow('pii-settings')) as never)
+  await $.session.append(cmdRow(stdoutRow(text)) as never)
+  expect(calls.length).toBe(1)
+  const stored = textOf(session.appended().at(-1)!)
+  expect(stored.includes(NAME)).toBe(false)
+})
+
+// ── 0.9: die Optionen des Mods ändert nur die Hand am Rechner ──
+// Gemessen im Terminal (2.1.329): nicht-sensitive Optionen eines Mods sind `/config`-Zeilen `<mod>.<feld>`; eine
+// Änderung über `/config` hört ein Hook mit Herkunft `composer`. Über die Remote-Control-Brücke (`bridge`) und aus
+// einem fremden Mod (`plugin`) ließen sich die Schutzoptionen sonst abschwächen.
+test('0.9 ownOptionChange: nur composer darf eigene Optionen ändern; fremde Zeilen gehen den Wächter nichts an', () => {
+  expect(ownOptionChange('anonym-legal-guard.leak_guard', { kind: 'composer' })).toBe('allow')
+  expect(ownOptionChange('anonym-legal-guard.leak_guard', { kind: 'bridge' })).toBe('deny')
+  expect(ownOptionChange('anonym-legal-guard.shell_guard', { kind: 'plugin', name: 'fremd' })).toBe('deny')
+  expect(ownOptionChange('anonym-legal-guard.ui_language', { kind: 'neu-und-unbekannt' })).toBe('deny')
+  expect(ownOptionChange('anonym-legal-guard.ui_language', undefined)).toBe('deny')
+  expect(ownOptionChange('theme', { kind: 'bridge' })).toBe('foreign')
+  expect(ownOptionChange('anderer-mod.leak_guard', { kind: 'plugin', name: 'x' })).toBe('foreign')
+  expect(ownOptionChange('anonym-legal-guard-nachbau.leak_guard', { kind: 'bridge' })).toBe('foreign')
+})
+
+test('0.9 Wächter: ein fremder Mod kann leak_guard nicht abschalten; eine fremde Zeile bleibt unberührt', OPTIONS, async ($, on) => {
+  fakeAnalyzer(on)
+  const written: string[] = []
+  on('config.set', (_$, e) => {
+    written.push(String((e as { key?: unknown }).key))
+    return { value: (e as { value?: unknown }).value } as never
+  })
+  // Der Test ruft als fremder Mod: Herkunft `plugin`.
+  const own = (await $.config.set({ key: 'anonym-legal-guard.leak_guard', value: 'off' } as never)) as { deny?: string }
+  expect(typeof own.deny).toBe('string')
+  expect(String(own.deny).includes('anonym.legal')).toBe(true)
+  expect(written).toEqual([])
+  const other = (await $.config.set({ key: 'theme', value: 'dark' } as never)) as { deny?: string }
+  expect(other.deny).toBe(undefined)
+  expect(written).toEqual(['theme']) // Muss-Treffer: die Messung kann durchlassen
+})
+
+test('0.9 ownCommandText: der Einstellungsdialog (/plugin) und seine zwei festen Ausgaben gehen durch, anderes von /plugin nicht', () => {
+  const own = { plugin: 'anonym-legal-guard', commands: ['pii', 'pii-settings', 'pii-setup'], outputs: new Set<string>() }
+  expect(ownCommandText(callRow('plugin'), own)).toBe(true)
+  expect(ownCommandText(callRow('plugin', 'configure anonym-legal-guard@anonym-legal'), own)).toBe(true)
+  expect(ownCommandText(callRow('plugin', 'configure anonym-legal-guard@inline'), own)).toBe(true)
+  expect(ownCommandText(callRow('plugin', 'configure anonym-legal-guard'), own)).toBe(true)
+  expect(ownCommandText('<local-command-stdout>Saved plugin options</local-command-stdout>', own)).toBe(true)
+  expect(ownCommandText('<local-command-stdout>Kept plugin options</local-command-stdout>', own)).toBe(true)
+  expect(ownCommandText(callRow('plugin', 'configure anderer-mod'), own)).toBe(false)
+  expect(ownCommandText(callRow('plugin', `install ${NAME}`), own)).toBe(false)
+  expect(ownCommandText(`<local-command-stdout>Saved plugin options for ${NAME}</local-command-stdout>`, own)).toBe(false)
+})
+
+test('0.9 ownCommandText: nur die drei genauen Formen der eigenen Befehle', () => {
+  const own = { plugin: 'anonym-legal-guard', commands: ['pii', 'pii-settings', 'pii-setup'], outputs: new Set(['Zeile 1\nZeile 2']) }
+  expect(ownCommandText(COMMAND_CAVEAT, own)).toBe(true)
+  expect(ownCommandText(callRow('pii'), own)).toBe(true)
+  expect(ownCommandText(stdoutRow('Zeile 1\nZeile 2'), own)).toBe(true)
+  expect(ownCommandText('<local-command-stdout>Zeile 1\nZeile 2</local-command-stdout>', own)).toBe(true) // ohne Mod-Vorspann
+  expect(ownCommandText(stdoutRow('Zeile 1\nZeile 2 und mehr'), own)).toBe(false)
+  expect(ownCommandText(callRow('pii', 'x'), own)).toBe(false)
+  expect(ownCommandText(callRow('pii').replace('<command-message>pii', '<command-message>pii-setup'), own)).toBe(false)
+  expect(ownCommandText(`${COMMAND_CAVEAT} ${NAME}`, own)).toBe(false)
+  expect(ownCommandText('', own)).toBe(false)
 })

@@ -35,7 +35,12 @@ export const PROFILES: ReadonlyArray<{ name: string; en: string; de: string; val
 
 const PLUGIN_ID = 'anonym-legal-guard@anonym-legal'
 
-/** Ein Ein-Zeilen-Befehl, der die Werte setzt (Werte als JSON über stdin, siehe `claude plugin configure --help`). */
+/**
+ * Ein Ein-Zeilen-Befehl, der die Werte setzt (Werte als JSON über stdin, siehe `claude plugin configure --help`).
+ * Alle Werte stehen als Text im JSON, auch Zahlen und Schalter: gemessen am 2026-11-20 mit Claude Code 2.1.329
+ * nimmt `--values-stdin` nur „a JSON object of strings“ an, wandelt den Text selbst in die Art des Manifests und
+ * weist `0.7` oder `true` als echte JSON-Werte ab.
+ */
 export function profileCommand(values: Record<string, string>): string {
   // printf statt echo: zsh (macOS) deutet Backslashes in echo, dann wäre das JSON kaputt.
   const quoted = JSON.stringify(values).replace(/'/g, "'\\''")
@@ -68,4 +73,124 @@ export function settingsReport(options: Record<string, unknown>, lang: Lang, ver
   for (const p of PROFILES) out.push(`  ${p.name} — ${de ? p.de : p.en}`, `    ${profileCommand(p.values)}`)
   out.push('', de ? 'Alle Typen für ignore_types: https://anonym.legal/entities' : 'All types for ignore_types: https://anonym.legal/entities')
   return out.join('\n')
+}
+
+// ── /pii-setup (0.9): eine geführte Einrichtung, die nichts selbst ändert ──────────────────────────────
+// Der Token geht nur über den Configure-Dialog von Claude Code (das Feld ist `sensitive`); ihn fragt der Mod nie
+// ab. Die Optionen setzt ein Befehl in der Shell: jede Änderung lädt den Mod neu, und mehrere Optionen lassen sich
+// aus dem Mod heraus nicht gemeinsam setzen. Reine Funktionen, ohne Netz testbar.
+
+const SETUP_LANGUAGES: ReadonlyArray<{ value: string; en: string; de: string }> = [
+  { value: 'account', en: 'Account default', de: 'Konto-Standard' },
+  { value: 'de', en: 'German (de)', de: 'Deutsch (de)' },
+  { value: 'en', en: 'English (en)', de: 'Englisch (en)' },
+  { value: 'de,en', en: 'German + English', de: 'Deutsch + Englisch' },
+]
+const SETUP_PROFILES: ReadonlyArray<{ name: string; en: string; de: string }> = [
+  { name: 'standard', en: 'Standard (recommended)', de: 'Standard (empfohlen)' },
+  { name: 'strict', en: 'Strict (law firm, health)', de: 'Streng (Kanzlei, Gesundheit)' },
+  { name: 'development', en: 'Development (source code)', de: 'Entwicklung (Quellcode)' },
+]
+
+export type SetupQuestion = { question: string; header: string; options: string[] }
+
+/** Die zwei Fragen des Assistenten: Erkennungssprache und Profil. Die Antworten sind feste Wörter, nie Werte. */
+export function setupQuestions(lang: Lang): { language: SetupQuestion; profile: SetupQuestion } {
+  const de = lang === 'de'
+  return {
+    language: {
+      question: de ? 'In welchen Sprachen soll anonym.legal Personendaten erkennen?' : 'In which languages should anonym.legal detect personal data?',
+      header: de ? 'Sprache' : 'Language',
+      options: SETUP_LANGUAGES.map((l) => (de ? l.de : l.en)),
+    },
+    profile: {
+      question: de ? 'Welches Profil passt zu deiner Arbeit?' : 'Which profile fits your work?',
+      header: de ? 'Profil' : 'Profile',
+      options: SETUP_PROFILES.map((p) => (de ? p.de : p.en)),
+    },
+  }
+}
+
+export type SetupPlan = { language: string; profile: string; command: string; isDefault: boolean }
+
+/**
+ * Aus den Antworten wird ein Befehl. Eine Antwort gilt nur, wenn sie genau eine der angebotenen ist; alles
+ * andere (freie Eingabe, Abbruch, kein Dialog) ergibt den Standard und wird nirgends ausgegeben. `isDefault`:
+ * Konto-Standard und Profil Standard sind die Werte, die ohnehin gelten; dafür braucht es keinen Befehl.
+ */
+export function setupPlan(answers: { language?: string; profile?: string }, lang: Lang): SetupPlan {
+  const de = lang === 'de'
+  const language = SETUP_LANGUAGES.find((l) => (de ? l.de : l.en) === answers.language)?.value ?? 'account'
+  const profile = SETUP_PROFILES.find((p) => (de ? p.de : p.en) === answers.profile)?.name ?? 'standard'
+  const values = PROFILES.find((p) => p.name === profile)?.values ?? {}
+  return { language, profile, command: profileCommand({ ...values, language }), isDefault: language === 'account' && profile === 'standard' }
+}
+
+/**
+ * Erster Schritt, solange kein Token gesetzt ist: nur der Weg zum Token. Den Token speichert der Einstellungsdialog
+ * von Claude Code als Geheimnis; der Mod kann ein solches Feld nicht setzen und nimmt den Token nie selbst an.
+ * `configure` ist der Befehl, der diesen Dialog direkt öffnet (der Mod stößt ihn zusätzlich selbst an).
+ */
+export function setupTokenText(input: { lang: Lang; stateLine: string; configure: string; replace?: boolean }): string {
+  const de = input.lang === 'de'
+  return [
+    de ? 'anonym.legal einrichten' : 'Set up anonym.legal',
+    input.stateLine,
+    '',
+    de
+      ? '1. Token kopieren: https://anonym.legal/app/settings?tab=developer öffnen, anmelden und unter „API Access Token“ auf Kopieren klicken. Das Konto braucht den Tarif Basic, Pro oder Business.'
+      : '1. Copy your token: open https://anonym.legal/app/settings?tab=developer, sign in and click Copy under "API Access Token". The account needs a Basic, Pro or Business plan.',
+    de
+      ? `2. Token einfügen: der Einstellungsdialog öffnet sich jetzt. Wenn nicht: ${input.configure} eingeben. Im ersten Feld „API token (anonym.legal)“ den Token einfügen, dann unten „Save“ wählen. Alle anderen Felder haben Standardwerte.`
+      : `2. Paste the token: the settings dialog opens now. If it does not, type ${input.configure}. Paste the token into the first field, "API token (anonym.legal)", then choose "Save" at the bottom. All other fields have defaults.`,
+    // Der Dialog lässt bei leerem Feld den alten Wert stehen (gemessen 2026-11-20): löschen geht nicht, ersetzen ja.
+    ...(input.replace
+      ? [
+          de
+            ? '   Es ist schon ein Token eingetragen, aber er ist ungültig oder abgelaufen. Der neue Token ersetzt den alten; ein leeres Feld lässt den alten stehen.'
+            : '   A token is already stored, but it is invalid or expired. The new token replaces the old one; an empty field keeps the old one.',
+        ]
+      : []),
+    de ? '3. Prüfen: /pii zeigt „geschützt“. Mehr ist nicht nötig.' : '3. Check: /pii shows "protected". Nothing else is needed.',
+    '',
+    de
+      ? 'Sprache oder Profil ändern (optional): danach noch einmal /pii-setup. Der Token wird von Claude Code als Geheimnis gespeichert; der Mod fragt ihn nie ab.'
+      : 'To change language or profile (optional): run /pii-setup again afterwards. Claude Code stores the token as a secret; the mod never asks for it.',
+  ].join('\n')
+}
+
+/** Zweiter Schritt, wenn der Token gesetzt ist: Sprache und Profil. Die Standardwahl braucht keinen Befehl. */
+export function setupOptionsText(input: { lang: Lang; stateLine: string; plan: SetupPlan }): string {
+  const de = input.lang === 'de'
+  const head = [de ? 'anonym.legal einrichten' : 'Set up anonym.legal', input.stateLine, '']
+  if (input.plan.isDefault) {
+    return [
+      ...head,
+      de
+        ? 'Sprache: Konto-Standard, Profil: Standard. Das sind die Werte, die schon gelten; es ist nichts zu ändern.'
+        : 'Language: account default, profile: standard. These already apply; there is nothing to change.',
+      de ? 'Alle Optionen mit Standard: /pii-settings' : 'All options with their defaults: /pii-settings',
+    ].join('\n')
+  }
+  return [
+    ...head,
+    de
+      ? `Sprache (${input.plan.language}) und Profil (${input.plan.profile}) setzen, in einer Shell, nicht hier im Chat:`
+      : `Set language (${input.plan.language}) and profile (${input.plan.profile}), in a shell, not here in the chat:`,
+    `   ${input.plan.command}`,
+    de ? 'Danach Claude Code neu starten und mit /pii prüfen.' : 'Then restart Claude Code and check with /pii.',
+    '',
+    de ? 'Diese Anleitung ändert nichts selbst. Alle Optionen mit Standard: /pii-settings' : 'Nothing is changed by this guide. All options with their defaults: /pii-settings',
+  ].join('\n')
+}
+
+/** Ein Fehler, den weder Token noch Profil beheben (Guthaben, Tarif, Netz, Sprache, Adresse): Zustand und nächster Schritt. */
+export function setupStateText(input: { lang: Lang; stateLine: string }): string {
+  const de = input.lang === 'de'
+  return [
+    de ? 'anonym.legal einrichten' : 'Set up anonym.legal',
+    input.stateLine,
+    '',
+    de ? 'Erst das beheben, dann noch einmal /pii-setup oder /pii.' : 'Fix this first, then run /pii-setup or /pii again.',
+  ].join('\n')
 }

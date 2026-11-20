@@ -1,4 +1,4 @@
-// anonym.legal PII-Schutzschicht für Claude Code (Prototyp v0.8: Zustand nur nach Serverprüfung, /pii-Selbsttest).
+// anonym.legal PII-Schutzschicht für Claude Code (v0.9: /pii-setup, Hinweis bei einer Absage, Wächter für die eigenen Optionen).
 //
 // Was der Mod tut:
 //   1. session.append: jede Zeile, die gespeichert und ans Modell geschickt wird, geht vorher
@@ -54,6 +54,12 @@ import {
   deriveStatus,
   reasonOf,
   safeUi,
+  ownCommandText,
+  ownOptionChange,
+  setupErrorResolved,
+  TOAST_KINDS,
+  TOAST_WINDOW_MS,
+  type RefuseKind,
   mayRevealOnSurface,
   sweepKnownDeep,
   renderGuarded,
@@ -64,13 +70,13 @@ import {
   type LastCheck,
 } from './core'
 import { msg, parseLang, type Key, type Lang } from './messages'
-import { settingsReport } from './settings'
+import { settingsReport, setupOptionsText, setupPlan, setupQuestions, setupStateText, setupTokenText } from './settings'
 import { bandKey, bandText, knownLanguage, paneModel, PANE_ID, PANE_TITLE, shownHost, shownLanguage, shownLanguages, shownPreset, shownSurface, shownSwitch, shownToken, shownTypes, type PaneInput } from './ui'
 
 type Block = { type: string; [field: string]: unknown }
 
 /** Fassung des Mods; muss zu `.claude-plugin/plugin.json` passen (der Mod liest keine Dateien). */
-export const VERSION = '0.8.0'
+export const VERSION = '0.9.0'
 const CLIENT = `ClaudeCodeMod/${VERSION}`
 
 /**
@@ -696,9 +702,32 @@ function withheld(content: readonly Block[]): Block[] {
 }
 
 async function note($: EngineInterface, patch: (s: GuardStats) => GuardStats): Promise<void> {
-  await update($, statsAtom, (old) => patch(old))
+  // Die Statistik ist Anzeige: keine Schutzentscheidung liest sie. Ein Fehler beim Fortschreiben (kaputter
+  // Bestand, Speicher) darf deshalb weder eine Sperre aufheben noch eine Zeile zurückhalten (0.9).
+  await safeUi(() => update($, statsAtom, (old) => patch(old)))
   // Nicht abwarten: ein Fehler der Statuszeile darf den Schutzpfad nicht berühren (0.8).
   void refreshUi($)
+}
+
+/** Wann zuletzt ein Toast je Art gezeigt wurde (Modulvariable: nach einem Neuladen höchstens ein Toast mehr). */
+const toastTimes: Partial<Record<RefuseKind, number[]>> = {}
+
+/**
+ * Der Text einer Absage des Mods (0.9): hängt den nächsten Schritt an, zählt die Absage, wo die Stelle es nicht
+ * selbst tut, und meldet sie als Toast. Der Toast hat einen festen Text je Art, nie den Absagetext (der kann
+ * Platzhalter tragen) und geht laut Typdatei auch an entfernte Geräte. Gewartet wird auf nichts: Zählen und
+ * Toast laufen neben der Rückgabe, ihre Fehler erreichen den Schutzpfad nicht.
+ */
+function refused($: EngineInterface, kind: RefuseKind, text: string, counted = false): string {
+  if (!counted) void note($, (s) => ({ ...s, blocked: s.blocked + 1 }))
+  if (kind !== 'count' && TOAST_KINDS.has(kind)) {
+    void safeUi(async () => {
+      const gate = rateWindow(toastTimes[kind] ?? [], await $.clock.now(), 1, TOAST_WINDOW_MS)
+      toastTimes[kind] = gate.times
+      if (gate.waitMs === undefined) $.ui.toast(t(`toast_${kind}`))
+    })
+  }
+  return `${text} ${t('refusedNext')}`
 }
 
 /** Der Zustand dieser Ladung, aus der einen Quelle `deriveStatus`. */
@@ -792,6 +821,43 @@ function scheduleRefresh($: EngineInterface): void {
       if (!handedOff) refreshPending = false
     }
   })
+}
+
+/** Die eigenen Befehle und die Texte, die sie zuletzt zurückgegeben haben (0.9, siehe `ownCommandText`). */
+const OWN_COMMANDS = ['pii', 'pii-settings', 'pii-setup'] as const
+const ownOutputs = new Set<string>()
+/** Merkt sich den Text eines eigenen Befehls, damit seine Zeile ungeprüft durchgeht. Höchstens die letzten acht. */
+function ownText(text: string): { text: string } {
+  ownOutputs.add(text.trim())
+  while (ownOutputs.size > 8) ownOutputs.delete(ownOutputs.values().next().value as string)
+  return { text }
+}
+/** Ob eine Zeile der Tür `command` ganz aus den genauen Formen eines eigenen Befehls besteht. */
+function ownCommandRow(content: unknown): boolean {
+  const blocks = Array.isArray(content) ? content : [content]
+  const own = { plugin: 'anonym-legal-guard', commands: OWN_COMMANDS, outputs: ownOutputs }
+  return (
+    blocks.length > 0 &&
+    blocks.every((b) =>
+      typeof b === 'string' ? ownCommandText(b, own) : !!b && (b as { type?: unknown }).type === 'text' && ownCommandText(String((b as { text?: unknown }).text ?? ''), own),
+    )
+  )
+}
+
+/**
+ * Unter welchem Namen Claude Code diesen Mod führt (`anonym-legal-guard@anonym-legal`, mit `--plugin-dir`
+ * `anonym-legal-guard@inline`): der Besitzer einer eigenen `/config`-Zeile. Ohne solche Zeile (kopflos) der
+ * Name aus dem Marktplatz.
+ */
+async function ownPluginId($: EngineInterface): Promise<string> {
+  try {
+    const row = (await $.config.list()).find((r) => r.key.startsWith('anonym-legal-guard.'))
+    const id = String((row?.provider as { plugin?: unknown } | undefined)?.plugin ?? '')
+    if (/^anonym-legal-guard(@[a-z0-9._-]+)?$/.test(id)) return id
+  } catch {
+    // keine Liste: Rückfall
+  }
+  return 'anonym-legal-guard@anonym-legal'
 }
 
 function worthRow(door: string, name: string | undefined, origin: string | undefined): boolean {
@@ -1031,9 +1097,22 @@ export const register: Register = (on, options) => {
     return r
   })
 
+  // ── 0b. Die Optionen des Mods ändert nur die Hand am Rechner (0.9) ──
+  // Ein angehängtes Gerät (Remote Control) oder ein fremder Mod könnte sonst `leak_guard`, `shell_guard` oder
+  // `file_values` über `/config` bzw. `$.config.set` abschwächen. `.catch` lehnt für eigene Zeilen ab (laut
+  // Typdatei wird ein gescheiterter Wächter sonst übersprungen und die Zeile geschrieben); fremde Zeilen reicht
+  // er weiter.
+  on('config.set', async ($, e, next) => {
+    if (ownOptionChange(e.key, e.origin) !== 'deny') return next(e)
+    void safeUi(() => $.ui.log(t('logConfigDenied', { field: e.key.slice(e.key.indexOf('.') + 1), origin: originKind(e.origin) ?? '?' })))
+    return { deny: t('configDenied') }
+  }).catch(($, e, next) => (next.called || ownOptionChange(e.key, e.origin) === 'foreign' ? next(e) : { deny: t('configDenied') }))
+
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'pii', description: t('cmdDescription') })
-    await $.command.register({ name: 'pii-settings', description: cfg.lang === 'de' ? 'anonym.legal: alle Einstellungen mit Standard und Profilen' : 'anonym.legal: all settings with defaults and profiles' })
+    // Ein Befehl, der sich nicht registrieren lässt, darf Statuszeile und Vorwärmen nicht aufhalten (0.9).
+    await safeUi(() => $.command.register({ name: 'pii', description: t('cmdDescription') }))
+    await safeUi(() => $.command.register({ name: 'pii-settings', description: cfg.lang === 'de' ? 'anonym.legal: alle Einstellungen mit Standard und Profilen' : 'anonym.legal: all settings with defaults and profiles' }))
+    await safeUi(() => $.command.register({ name: 'pii-setup', description: cfg.lang === 'de' ? 'anonym.legal: Einrichtung Schritt für Schritt' : 'anonym.legal: setup step by step' }))
     void refreshUi($)
     // Vorwärmen ohne zu warten: über einen Zeitgeber, damit die Arbeit den Start überdauert
     // (Referenz „Work that outlives a dispatch“). `session.start` läuft bei jeder frischen Ladung
@@ -1042,7 +1121,49 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // Nicht `ownText`: der Bericht zeigt die Optionswerte unverändert (ein Preset kann einen Namen tragen), seine Zeile
+  // geht deshalb durch die Erkennung wie fremder Text (Codex-Prüfung 0.9).
   on('command.run', { command: 'pii-settings' }, async () => ({ text: settingsReport(rawOptions, cfg.lang, VERSION) }))
+
+  // /pii-setup (0.9): führt durch die Einrichtung. Ohne Token nur der Weg zum Token: der Mod stößt den
+  // Einstellungsdialog von Claude Code an (`/plugin configure <mod>`), denn nur der speichert ein Geheimnis; der Mod
+  // kann ein sensitives Feld nicht setzen (gemessen: es ist keine `/config`-Zeile) und nimmt den Token nie selbst an.
+  // Mit Token: Sprache und Profil; die Standardwahl braucht keinen Befehl. Abbruch, freie Eingabe und Sitzungen
+  // ohne Dialog (`claude -p`) ergeben die Standardwahl; eine freie Eingabe wird nie ausgegeben.
+  on('command.run', { command: 'pii-setup' }, async ($) => {
+    // Mit Token erst prüfen, wie `/pii`: nach einem Neuladen steht der Zustand sonst auf „prüft“, und ein
+    // ungültiger Token fiele nicht auf (Rückmeldung des Eigentümers 2026-11-20).
+    if (apiKey && !cfg.urlProblem) await warm($).catch(() => undefined)
+    const st = currentStatus()
+    const needsToken = !apiKey || st.reason === 'unauthorized'
+    // Im Token-Schritt sind die Schritte selbst der nächste Schritt: kein doppelter Verweis.
+    const next = needsToken ? '' : nextStep(st.reason)
+    const detail = st.reason ? t('piiStateDetail', { reason: t(`reason_${st.reason}` as const), next }).trimEnd() : ''
+    const stateLine = t('piiState', { state: t(`state_${st.state}` as const), detail })
+    if (needsToken) {
+      const id = await ownPluginId($)
+      // Über einen Zeitgeber: aus einem `command.run`-Hook heraus lehnt die Engine `$.command.run` ab („it would
+      // wait on the turn this hook is holding“). So läuft `/plugin configure` gleich nach dieser Anleitung. Scheitert
+      // es, steht der Befehl in der Anleitung; der Grund geht ins Debug-Log.
+      $.clock.after(0, () =>
+        void Promise.resolve()
+          .then(() => $.command.run({ command: 'plugin', args: `configure ${id}` } as never))
+          .catch((err: unknown) => safeUi(() => $.ui.log(`anonym.legal: settings dialog not opened (${err instanceof Error ? err.message.slice(0, 160) : 'error'})`, { to: 'debug' }))),
+      )
+      return ownText(setupTokenText({ lang: cfg.lang, stateLine, configure: `/plugin configure ${id}`, replace: !!apiKey }))
+    }
+    // Ein anderer Fehler (Guthaben, Tarif, Netz, Sprache, Adresse): erst den beheben, keine Fragen.
+    if (st.state !== 'protected' && st.state !== 'checking') return ownText(setupStateText({ lang: cfg.lang, stateLine }))
+    const answers: { language?: string; profile?: string } = {}
+    const q = setupQuestions(cfg.lang)
+    try {
+      answers.language = await $.ui.ask(q.language.question, { options: q.language.options, header: q.language.header })
+      answers.profile = await $.ui.ask(q.profile.question, { options: q.profile.options, header: q.profile.header })
+    } catch {
+      // kein Dialog oder abgebrochen: Standardwahl
+    }
+    return ownText(setupOptionsText({ lang: cfg.lang, stateLine, plan: setupPlan(answers, cfg.lang) }))
+  })
 
   // /pii ist ein Selbsttest (0.8): erst eine neue Prüfung (mit der Zeitgrenze jeder Anfrage), dann die Auskunft.
   on('command.run', { command: 'pii' }, async ($) => {
@@ -1061,8 +1182,8 @@ export const register: Register = (on, options) => {
     void refreshUi($)
     // Die Pane zusätzlich zum Text; nicht abgewartet, Fehler und `isPlaced: false` bleiben still.
     void safeUi(() => $.ui.open({ id: PANE_ID, title: PANE_TITLE, closeOnEscape: true }))
-    return {
-      text: [
+    return ownText(
+      [
         t('limits'),
         t('piiState', { state, detail }),
         t('piiVersion', { version: VERSION, cc: env.cc, surfaces: env.surfaces }),
@@ -1078,9 +1199,9 @@ export const register: Register = (on, options) => {
         t('piiRate', { n: inWindow, limit: RATE_LIMIT, plan }),
         // 2.4: `session.start` bekommt kein Signal für eine fortgesetzte Sitzung.
         t('piiResume'),
-        s.lastError ? t('piiLastError', { err: codeText(s.lastError) }) : t('piiNoError'),
+        s.lastError && !setupErrorResolved(s.lastError, st.state) ? t('piiLastError', { err: codeText(s.lastError) }) : t('piiNoError'),
       ].join('\n'),
-    }
+    )
   })
 
   // ── Firewall-Seitenleiste und Sperr-Band ────────────────────────
@@ -1130,6 +1251,9 @@ export const register: Register = (on, options) => {
     const origin = originKind(e.origin)
     void safeUi(() => $.ui.log(`anonym.legal: Zeile ${e.door}${e.message.name ? `/${e.message.name}` : ''} (${origin ?? '?'})`, { to: 'debug' }))
     if (!worthRow(e.door, e.message.name, origin)) return next(e)
+    // Die drei Zeilen eines eigenen Befehls gehen ungeprüft durch (0.9): sonst hält der Mod ohne Token seine
+    // eigene Auskunft zurück. Nur die genauen Formen, siehe `ownCommandText`.
+    if (e.door === 'command' && ownCommandRow(e.message.content)) return next(e)
     let content: Block[]
     try {
       content = await scrubBlocks($, e.message.content as Block[])
@@ -1183,7 +1307,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => (next.called ? next(e) : SECTIONS.test(e.name) ? { text: null } : next(e)))
 
   on('session.send', async ($, e, next) => next({ ...e, text: await scrub($, e.text) })).catch(($, e, next) =>
-    next.called ? next(e) : { isDelivered: false, reason: t('sendReason') },
+    next.called ? next(e) : { isDelivered: false, reason: refused($, 'send', t('sendReason')) },
   )
 
   on('session.compact', async ($, e, next) =>
@@ -1196,10 +1320,10 @@ export const register: Register = (on, options) => {
     // Streng-Modus: schreibende Werkzeuge mit Platzhaltern laufen nicht, statt
     // echte Werte auf die Platte zu schreiben. Lesen und Suchen bekommen weiter echte Werte.
     if (cfg.fileValues === 'deny' && WRITERS.has(String(e.tool)) && leftoverTokens(Object.fromEntries(Object.entries(e).filter(([k]) => !RESERVED.has(k)))).length) {
-      return { deny: STRICT_FILES() }
+      return { deny: refused($, 'files', STRICT_FILES()) }
     }
     const r = await restoreArgs($, e)
-    if ('leftover' in r) return { deny: LEFTOVER(r.leftover) }
+    if ('leftover' in r) return { deny: refused($, 'files', LEFTOVER(r.leftover)) }
     // Markieren, nur Auskunft: hat das Zurückübersetzen Werte einer schreibenden Datei
     // geändert, steht ihr Pfad in `tainted`. Verglichen werden die Werte, nicht die Objekte.
     if (WRITERS.has(String(e.tool)) && JSON.stringify(r) !== JSON.stringify(e)) {
@@ -1207,16 +1331,16 @@ export const register: Register = (on, options) => {
       if (path) await update($, taintedAtom, (t) => (t.includes(path) ? t : [...t, path]))
     }
     return next(r)
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED() }))
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: refused($, 'files', RESTORE_FAILED()) }))
   if (detokenizeBash) {
     on('tool.call', { tool: ['Bash', 'PowerShell'] }, async ($, e, next) => {
       // Streng-Modus: auch ein Befehl setzt keine echten Werte ein (sonst schriebe `echo … > datei` sie doch).
       if (cfg.fileValues === 'deny' && leftoverTokens(Object.fromEntries(Object.entries(e).filter(([k]) => !RESERVED.has(k)))).length) {
-        return { deny: STRICT_FILES() }
+        return { deny: refused($, 'files', STRICT_FILES()) }
       }
       const r = await restoreArgs($, e)
-      return 'leftover' in r ? { deny: LEFTOVER(r.leftover) } : next(r)
-    }).catch(($, e, next) => (next.called ? next(e) : { deny: RESTORE_FAILED() }))
+      return 'leftover' in r ? { deny: refused($, 'files', LEFTOVER(r.leftover)) } : next(r)
+    }).catch(($, e, next) => (next.called ? next(e) : { deny: refused($, 'files', RESTORE_FAILED()) }))
   }
 
   // ── 4b. Befehle: ablehnen und nachfragen ──────────────────────────
@@ -1231,10 +1355,10 @@ export const register: Register = (on, options) => {
       if (!v) return next(e)
       const action = shellGuard === 'ask' ? 'ask' : v.action
       void safeUi(() => $.ui.log(t(action === 'deny' ? 'logShellDenied' : 'logShellAsk', { reason: v.reason })))
-      if (action === 'deny') return { decision: 'deny', reason: `${t('shellDenied', { reason: v.reason })} ${t('notALock')}` }
+      if (action === 'deny') return { decision: 'deny', reason: refused($, 'shell', `${t('shellDenied', { reason: v.reason })} ${t('notALock')}`) }
       const below = await next(e)
       return below.decision === 'deny' ? below : { decision: 'ask', reason: `${t('shellAsk', { reason: v.reason })} ${t('notALock')}` }
-    }).catch(() => ({ decision: 'deny', reason: `${t('shellCheckFailed')} ${t('notALock')}` }))
+    }).catch(($) => ({ decision: 'deny', reason: refused($, 'shell', `${t('shellCheckFailed')} ${t('notALock')}`) }))
   }
 
   // ── 4c. Ausgänge: Werkzeuge ohne echte Werte ─────────────
@@ -1253,8 +1377,8 @@ export const register: Register = (on, options) => {
       const stop = leakGuard === 'block' && leak.strong
       await note($, (s) => ({ ...s, leaks: s.leaks + 1, blocked: s.blocked + (stop ? 1 : 0) }))
       void safeUi(() => $.ui.log(t(stop ? 'logEgressStop' : 'logEgressNote', { tool: String(e.tool), token: shownToken(leak.token, cfg.lang) })))
-      return stop ? { deny: `${EGRESS_STOPPED()} (${shownToken(leak.token, cfg.lang)}). ${t('notALock')}` } : next(e)
-    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: `${EGRESS_STOPPED()} (${t('checkFailed')}). ${t('notALock')}` } : next(e)))
+      return stop ? { deny: refused($, 'egress', `${EGRESS_STOPPED()} (${shownToken(leak.token, cfg.lang)}). ${t('notALock')}`, true) } : next(e)
+    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: refused($, 'egress', `${EGRESS_STOPPED()} (${t('checkFailed')}). ${t('notALock')}`) } : next(e)))
   }
 
   // ── 5. Anzeige für den Menschen ──────────────────────────────────────────
@@ -1287,11 +1411,11 @@ export const register: Register = (on, options) => {
       // Zählanfragen tragen ungeschwärzten Inhalt großer Werkzeug-Ergebnisse: nie hinaus (2026-11-17).
       if (isTokenCountRequest(e.url)) {
         await note($, (s) => ({ ...s, blocked: s.blocked + 1 }))
-        return { deny: TOKEN_COUNT_WITHHELD() }
+        return { deny: refused($, 'count', TOKEN_COUNT_WITHHELD(), true) }
       }
       // Geprüft werden URL und Körper; eine Anfrage ohne Körper über die URL allein.
       const leak = requestLeak(e.url, e.init?.body, await read($, vaultAtom))
-      if (leak && 'unreadable' in leak) return leakGuard === 'block' ? { deny: `${LEAK_STOPPED()} (${t('bodyUnreadable')})` } : next(e)
+      if (leak && 'unreadable' in leak) return leakGuard === 'block' ? { deny: refused($, 'request', `${LEAK_STOPPED()} (${t('bodyUnreadable')})`) } : next(e)
       if (!leak) return next(e)
       if (leakGuard === 'block' && leak.strong) {
         // Erst ersetzen, dann neu prüfen (0.7.2): ein Klarwert im Verlauf darf die Sitzung nicht für immer sperren.
@@ -1310,7 +1434,7 @@ export const register: Register = (on, options) => {
       const stop = leakGuard === 'block' && leak.strong
       await note($, (s) => ({ ...s, leaks: s.leaks + 1, blocked: s.blocked + (stop ? 1 : 0) }))
       void safeUi(() => $.ui.log(t(stop ? 'logLeakStop' : 'logLeakNote', { token: shownToken(leak.token, cfg.lang) })))
-      return stop ? { deny: LEAK_STOPPED() } : next(e)
-    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: `${LEAK_STOPPED()} (${t('checkFailed')})` } : next(e)))
+      return stop ? { deny: refused($, 'request', LEAK_STOPPED(), true) } : next(e)
+    }).catch(($, e, next) => (next.called ? next(e) : leakGuard === 'block' ? { deny: refused($, 'request', `${LEAK_STOPPED()} (${t('checkFailed')})`) } : next(e)))
   }
 }
